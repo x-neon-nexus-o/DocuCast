@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pypdf
+google-genai>=1.0.0
+edge-tts
+python-multipart
+python-dotenv
