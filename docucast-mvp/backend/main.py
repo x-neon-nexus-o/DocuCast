@@ -1,4 +1,4 @@
-"""FastAPI entrypoint for DocuCast MVP."""
+"""FastAPI entrypoint for DocuCast MVP - with free unlimited AI alternatives."""
 
 import base64
 import os
@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from utils.pdf_parser import extract_text_from_pdf
-from utils.script_generator import generate_script
+from utils.script_generator import generate_script_with_provider, get_available_providers
 from utils.tts_engine import generate_audio_bytes
 
 load_dotenv()
@@ -35,16 +35,21 @@ allow_origins = [
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
     if origin
 ]
+# If no prod origin set, allow all for dev/preview (Arena, Codespaces etc)
+if not allow_origins:
+    allow_origins = ["*"]
 
-app = FastAPI(title="DocuCast MVP", version="1.0.0")
+app = FastAPI(title="DocuCast MVP", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
-    allow_credentials=True,
+    allow_origins=allow_origins if allow_origins != ["*"] else ["*"],
+    allow_credentials=True if allow_origins != ["*"] else False,
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -53,7 +58,6 @@ app.add_middleware(
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        # First IP in the chain is the original client.
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
@@ -61,7 +65,6 @@ def _client_ip(request: Request) -> str:
 def _check_throttle(ip: str) -> None:
     now = time.time()
     log = _request_log[ip]
-    # Drop entries outside the window.
     while log and now - log[0] > THROTTLE_WINDOW_SECONDS:
         log.popleft()
     if len(log) >= THROTTLE_MAX_REQUESTS:
@@ -75,7 +78,40 @@ def _check_throttle(ip: str) -> None:
 
 @app.get("/")
 def health() -> dict:
-    return {"status": "ok", "service": "DocuCast MVP"}
+    providers = get_available_providers()
+    active = [k for k, v in providers.items() if v]
+    return {
+        "status": "ok",
+        "service": "DocuCast MVP",
+        "version": "1.1.0",
+        "providers": providers,
+        "active_providers": active,
+        "llm_provider_mode": os.getenv("LLM_PROVIDER", "auto"),
+        "note": "If Gemini limits hit, add GROQ_API_KEY (free) or use local fallback - app never breaks",
+    }
+
+
+@app.get("/providers")
+def list_providers() -> dict:
+    """Show which AI providers are configured and ready.
+    
+    Helps debug 'limits finished' - see alternatives that work without limits.
+    """
+    providers = get_available_providers()
+    order = os.getenv("LLM_PROVIDER", "auto")
+    return {
+        "mode": order,
+        "providers": providers,
+        "setup_guide": {
+            "groq": "Free 14k req/day at https://console.groq.com/keys -> set GROQ_API_KEY",
+            "openrouter": "Free models at https://openrouter.ai/keys -> set OPENROUTER_API_KEY",
+            "huggingface": "Free at https://huggingface.co/settings/tokens -> set HF_TOKEN",
+            "ollama": "100% free unlimited offline: install https://ollama.com then `ollama pull llama3.2` + `ollama serve`",
+            "local": "Always works, no key needed - TF summarizer + podcast template",
+            "cerebras": "Free tier at https://cloud.cerebras.ai/ -> set CEREBRAS_API_KEY",
+        },
+        "recommendation": "When Gemini limits finished: GROQ_API_KEY is fastest free fix (1 min setup). For unlimited offline, use Ollama or 'local'.",
+    }
 
 
 @app.post("/generate")
@@ -86,14 +122,12 @@ async def generate(
     client_ip = _client_ip(request)
     _check_throttle(client_ip)
 
-    # --- Validate file type ------------------------------------------------
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are accepted. Please upload a .pdf file.",
         )
 
-    # --- Read file (with size cap) -----------------------------------------
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
@@ -104,7 +138,6 @@ async def generate(
         )
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        # Secondary check in case content-type was spoofed/omitted.
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are accepted. Please upload a .pdf file.",
@@ -125,19 +158,24 @@ async def generate(
             ),
         )
 
-    # --- Generate script (Gemini) -----------------------------------------
+    # --- Generate script (Multi-provider with automatic fallback) -----------
+    # Now supports: Gemini -> Groq -> OpenRouter -> Cerebras -> HuggingFace -> Ollama -> Local
+    # If Gemini hits quota (429), it auto-falls back to next free provider.
+    # If NO keys set, local fallback ensures it still works unlimited.
     try:
-        api_key = os.getenv("GEMINI_API_KEY", "")
-        script = generate_script(extracted_text, api_key)
+        script, provider_used = generate_script_with_provider(extracted_text)
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - defensive
+        # Should rarely happen since local fallback always works, but handle
+        msg = str(exc)
+        if "quota" in msg.lower() or "limit" in msg.lower() or "429" in msg:
+            msg += " Tip: Set GROQ_API_KEY (free at console.groq.com) or LLM_PROVIDER=local for unlimited offline."
+        raise HTTPException(status_code=502, detail=msg) from exc
+    except Exception as exc:
         raise HTTPException(
-            status_code=502, detail=f"Script generation failed: {exc}"
+            status_code=502, detail=f"Script generation failed: {exc}. Try setting GROQ_API_KEY or LLM_PROVIDER=local"
         ) from exc
 
     # --- Synthesize audio (Edge-TTS) --------------------------------------
-    # Wrapped independently so a TTS failure does not discard the script.
     audio_base64: Optional[str] = None
     audio_error: Optional[str] = None
     try:
@@ -145,11 +183,16 @@ async def generate(
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
         audio_error = f"Audio synthesis failed: {exc}"
 
-    payload: dict = {"script": script, "audio_base64": audio_base64}
+    payload: dict = {"script": script, "audio_base64": audio_base64, "provider": provider_used}
     if audio_error:
         payload["audio_error"] = audio_error
+    # Add helpful note if fallback was used
+    if provider_used == "local":
+        payload["provider_note"] = "Generated with local fallback (no API) - unlimited. For higher quality, set GROQ_API_KEY (free)."
+    elif provider_used != "gemini":
+        payload["provider_note"] = f"Generated with {provider_used} (Gemini alternative) - free tier."
 
     return JSONResponse(status_code=200, content=payload)
