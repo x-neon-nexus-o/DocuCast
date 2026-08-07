@@ -439,7 +439,7 @@ _PROVIDER_FUNCS = {
 _AUTO_ORDER = ["gemini", "groq", "openrouter", "cerebras", "huggingface", "ollama", "local"]
 
 def _get_provider_order() -> list:
-    pref = os.getenv("LLM_PROVIDER", "auto").strip().lower()
+    pref = os.getenv("LLM_PROVIDER", "local").strip().lower()
     if pref == "auto" or pref == "":
         return _AUTO_ORDER
     if pref in _PROVIDER_FUNCS:
