@@ -5,3 +5,8 @@ google-genai>=1.0.0
 edge-tts
 python-multipart
 python-dotenv
+# --- Free unlimited alternatives (pick any, no extra install needed for basic use) ---
+requests
+openai>=1.0.0
+# Optional: for Hugging Face inference (free tier)
+huggingface_hub

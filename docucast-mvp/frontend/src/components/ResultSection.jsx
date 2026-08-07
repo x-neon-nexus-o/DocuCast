@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-export default function ResultSection({ script, audioBase64, audioError, fileName }) {
+export default function ResultSection({ script, audioBase64, audioError, fileName, provider, providerNote }) {
   const [feedback, setFeedback] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
@@ -32,12 +32,37 @@ export default function ResultSection({ script, audioBase64, audioError, fileNam
 
   return (
     <section className="rounded-2xl bg-dcCard border border-white/5 p-5 sm:p-6 shadow-xl flex flex-col gap-5 animate-fade-in">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-semibold">Your Podcast Script</h2>
-        <span className="text-xs text-dcMuted">
-          {script.trim().split(/\s+/).length} words
-        </span>
+        <div className="flex items-center gap-2">
+          {provider && (
+            <span
+              className={`text-[11px] font-semibold px-2 py-1 rounded-full border ${
+                provider === "local"
+                  ? "bg-yellow-500/15 border-yellow-500/30 text-yellow-300"
+                  : provider === "gemini"
+                    ? "bg-blue-500/15 border-blue-500/30 text-blue-300"
+                    : "bg-emerald-500/15 border-emerald-500/30 text-emerald-300"
+              }`}
+            >
+              {provider === "local" ? "⚡ Local (unlimited)" : provider === "gemini" ? "✦ Gemini" : `✓ ${provider}`}
+            </span>
+          )}
+          <span className="text-xs text-dcMuted">{script.trim().split(/\s+/).length} words</span>
+        </div>
       </div>
+
+      {providerNote && (
+        <div
+          className={`rounded-xl px-3 py-2 text-xs leading-relaxed border ${
+            provider === "local"
+              ? "bg-yellow-500/10 border-yellow-500/20 text-yellow-200"
+              : "bg-emerald-500/10 border-emerald-500/20 text-emerald-200"
+          }`}
+        >
+          {providerNote}
+        </div>
+      )}
 
       {/* Script card */}
       <div className="script-scroll max-h-72 overflow-y-auto rounded-xl bg-dcBg/60 border border-white/5 p-4 text-sm leading-relaxed whitespace-pre-wrap text-dcText/90">
