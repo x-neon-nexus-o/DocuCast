@@ -7,10 +7,20 @@ from collections import defaultdict, deque
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
+from utils.auth import (
+    authenticate_user,
+    create_session,
+    ensure_user,
+    initialize_database,
+    register_user,
+    revoke_session,
+    verify_session,
+)
 from utils.pdf_parser import extract_text_from_pdf
 from utils.script_generator import generate_script_with_provider, get_available_providers
 from utils.tts_engine import generate_audio_bytes
@@ -54,6 +64,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+AUTH_USERNAME = os.getenv("DOCUCAST_USERNAME", "admin")
+AUTH_PASSWORD = os.getenv("DOCUCAST_PASSWORD", "docucast")
+AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DOCUCAST_TOKEN_TTL_SECONDS", "43200"))
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    initialize_database()
+    ensure_user(AUTH_USERNAME, AUTH_PASSWORD)
+
 
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
@@ -74,6 +104,58 @@ def _check_throttle(ip: str) -> None:
             detail=f"Too many requests. Please try again in {retry_after} seconds.",
         )
     log.append(now)
+
+
+def _require_user(authorization: Optional[str] = Header(default=None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Please log in to continue.")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        username = verify_session(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return username
+
+
+@app.post("/auth/login")
+def login(payload: LoginRequest) -> dict:
+    if not authenticate_user(payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    access_token = create_session(payload.username, AUTH_TOKEN_TTL_SECONDS)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {"username": payload.username},
+    }
+
+
+@app.post("/auth/register")
+def register(payload: RegisterRequest) -> dict:
+    try:
+        register_user(payload.username, payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    access_token = create_session(payload.username.strip(), AUTH_TOKEN_TTL_SECONDS)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {"username": payload.username.strip()},
+    }
+
+
+@app.get("/auth/me")
+def me(current_user: str = Depends(_require_user)) -> dict:
+    return {"authenticated": True, "user": {"username": current_user}}
+
+
+@app.post("/auth/logout")
+def logout(authorization: Optional[str] = Header(default=None)) -> dict:
+    if authorization and authorization.startswith("Bearer "):
+        revoke_session(authorization.removeprefix("Bearer ").strip())
+    return {"logged_out": True}
 
 
 @app.get("/")
@@ -118,6 +200,7 @@ def list_providers() -> dict:
 async def generate(
     request: Request,
     file: UploadFile = File(...),
+    current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     client_ip = _client_ip(request)
     _check_throttle(client_ip)

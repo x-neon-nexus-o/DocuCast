@@ -2,7 +2,7 @@
 
 Turn an uploaded PDF into a short, podcast-style audio explanation using AI-generated analogies.
 
-A lean, zero-cost-stack MVP: **React + Vite + TailwindCSS** frontend, **FastAPI + Gemini + Edge-TTS** backend. Now with **free unlimited AI alternatives** when Gemini limits are hit. No auth, no database, no file persistence.
+A lean, zero-cost-stack MVP: **React + Vite + TailwindCSS** frontend, **FastAPI + Gemini + Edge-TTS** backend. Now with **free unlimited AI alternatives** when Gemini limits are hit and a **SQLite-backed login database** for auth and registration.
 
 ## ✅ Current Status (Fixed)
 
@@ -27,7 +27,9 @@ docucast-mvp/
         ResultSection.jsx
   backend/         # FastAPI
     main.py
+    docucast.db     # created automatically on first run
     utils/
+      auth.py
       pdf_parser.py
       script_generator.py   # <-- multi-provider fallback here
       tts_engine.py
@@ -106,7 +108,20 @@ pip install -r requirements.txt
 # Create .env file (already created for you)
 # The file contains:
 # LLM_PROVIDER=local
+
+# Optional login settings for the new auth gate:
+# DOCUCAST_USERNAME=admin
+# DOCUCAST_PASSWORD=docucast
+# DOCUCAST_AUTH_SECRET=change-me-for-deployment
 ```
+
+The first startup will create `backend/docucast.db`, add the users and sessions tables, and seed the default login if no user exists yet.
+
+The auth API now includes:
+
+- `POST /auth/register` to create a new user and start a session immediately.
+- `POST /auth/login` to sign in with an existing account.
+- `POST /auth/logout` to revoke the current session.
 
 **Verify the fix:**
 
@@ -139,6 +154,16 @@ You should see:
   "llm_provider_mode": "local"
 }
 ```
+
+### 4. Login Flow
+
+The frontend now requires a login session before file upload is enabled.
+
+- `POST /auth/login` returns a bearer token for the configured username/password.
+- `GET /auth/me` validates the current session.
+- `POST /generate` now requires an `Authorization: Bearer ...` header.
+
+If you do not set the login environment variables, the local development defaults are `admin` / `docucast`.
 
 ### 4. Frontend Setup
 
