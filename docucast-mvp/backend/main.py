@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -21,14 +21,26 @@ from utils.auth import (
     revoke_session,
     verify_session,
 )
-from utils.pdf_parser import extract_text_from_pdf
-from utils.script_generator import generate_script_with_provider, get_available_providers
-from utils.tts_engine import generate_audio_bytes
+from utils.document_parser import SUPPORTED_EXTENSIONS, parse_document
+from utils.script_generator import (
+    DEFAULT_OPTIONS,
+    generate_script_with_provider,
+    get_available_providers,
+)
+from utils.tts_engine import generate_audio
+from utils.vision import vision_available
 
 load_dotenv()
 
-MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
-ALLOWED_CONTENT_TYPES = {"application/pdf"}
+MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB (PPTX decks with images run large)
+ALLOWED_CONTENT_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "text/markdown",
+    "text/x-markdown",
+    "text/plain",
+    "application/octet-stream",  # browsers often send this for .md — extension is validated separately
+}
 
 # Simple per-IP in-memory throttle: max N requests within WINDOW seconds.
 THROTTLE_MAX_REQUESTS = 5
@@ -54,7 +66,7 @@ allow_origins = [
 if not allow_origins:
     allow_origins = ["*"]
 
-app = FastAPI(title="DocuCast MVP", version="1.1.0")
+app = FastAPI(title="DocuCast", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -164,9 +176,11 @@ def health() -> dict:
     active = [k for k, v in providers.items() if v]
     return {
         "status": "ok",
-        "service": "DocuCast MVP",
-        "version": "1.1.0",
+        "service": "DocuCast",
+        "version": "2.0.0",
+        "supported_formats": sorted(SUPPORTED_EXTENSIONS),
         "providers": providers,
+        "vision": vision_available(),
         "active_providers": active,
         "llm_provider_mode": os.getenv("LLM_PROVIDER", "auto"),
         "note": "If Gemini limits hit, add GROQ_API_KEY (free) or use local fallback - app never breaks",
@@ -200,15 +214,33 @@ def list_providers() -> dict:
 async def generate(
     request: Request,
     file: UploadFile = File(...),
+    mode: str = Form("dialogue"),
+    length: str = Form("standard"),
+    tone: str = Form("conversational"),
+    audience: str = Form("general"),
+    focus: str = Form(""),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     client_ip = _client_ip(request)
     _check_throttle(client_ip)
 
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
+    # --- Validate file --------------------------------------------------------
+    filename = (file.filename or "").strip()
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == ".ppt":
         raise HTTPException(
             status_code=400,
-            detail="Only PDF files are accepted. Please upload a .pdf file.",
+            detail="Legacy .ppt isn't supported — re-save the deck as .pptx and upload again.",
+        )
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Upload a .pdf, .pptx, .md or .txt file.",
+        )
+    if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES and not file.content_type.startswith("text/"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unexpected content type '{file.content_type}'. Upload a .pdf, .pptx, .md or .txt file.",
         )
 
     file_bytes = await file.read()
@@ -217,38 +249,37 @@ async def generate(
     if len(file_bytes) > MAX_FILE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail="File exceeds the 10 MB limit. Please upload a smaller PDF.",
+            detail="File exceeds the 20 MB limit. Please upload a smaller file.",
         )
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are accepted. Please upload a .pdf file.",
-        )
+    # --- Validate options ------------------------------------------------------
+    options = {
+        "mode": mode if mode in {"dialogue", "solo"} else DEFAULT_OPTIONS["mode"],
+        "length": length if length in {"brief", "standard", "deep"} else DEFAULT_OPTIONS["length"],
+        "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
+        "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
+        "focus": (focus or "").strip()[:300],
+    }
 
-    # --- Extract text ------------------------------------------------------
+    # --- Parse document: text + tables + images + charts + handwriting ---------
     try:
-        extracted_text = extract_text_from_pdf(file_bytes)
+        parsed = parse_document(file_bytes, filename)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read this file: {exc}") from exc
 
-    if not extracted_text.strip():
+    enriched = parsed.enriched_text()
+    if not enriched.strip():
         raise HTTPException(
             status_code=422,
-            detail=(
-                "No readable text was found in this PDF. It may be a scanned or "
-                "image-only document. Please upload a PDF with selectable text."
-            ),
+            detail="No narratable content was found in this document.",
         )
 
     # --- Generate script (Multi-provider with automatic fallback) -----------
-    # Now supports: Gemini -> Groq -> OpenRouter -> Cerebras -> HuggingFace -> Ollama -> Local
-    # If Gemini hits quota (429), it auto-falls back to next free provider.
-    # If NO keys set, local fallback ensures it still works unlimited.
     try:
-        script, provider_used = generate_script_with_provider(extracted_text)
+        script, provider_used = generate_script_with_provider(enriched, options=options)
     except ValueError as exc:
-        # Should rarely happen since local fallback always works, but handle
         msg = str(exc)
         if "quota" in msg.lower() or "limit" in msg.lower() or "429" in msg:
             msg += " Tip: Set GROQ_API_KEY (free at console.groq.com) or LLM_PROVIDER=local for unlimited offline."
@@ -258,18 +289,34 @@ async def generate(
             status_code=502, detail=f"Script generation failed: {exc}. Try setting GROQ_API_KEY or LLM_PROVIDER=local"
         ) from exc
 
-    # --- Synthesize audio (Edge-TTS) --------------------------------------
+    # --- Synthesize audio (Edge-TTS → gTTS → Piper → espeak-ng offline) -------
     audio_base64: Optional[str] = None
     audio_error: Optional[str] = None
+    audio_engine: Optional[str] = None
+    audio_mime: Optional[str] = None
     try:
-        audio_bytes = generate_audio_bytes(script)
+        audio_bytes, audio_engine, audio_mime = generate_audio(script)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
     except Exception as exc:
         audio_error = f"Audio synthesis failed: {exc}"
 
-    payload: dict = {"script": script, "audio_base64": audio_base64, "provider": provider_used}
+    payload: dict = {
+        "script": script,
+        "audio_base64": audio_base64,
+        "audio_engine": audio_engine,
+        "audio_mime": audio_mime,
+        "provider": provider_used,
+        "options": options,
+        "analysis": parsed.summary_payload(),
+        "filename": filename,
+    }
+    if audio_engine == "espeak-ng":
+        payload["audio_note"] = (
+            "Audio was synthesized with the offline fallback voice (cloud TTS unreachable). "
+            "It always works, but sounds robotic — on a normal network you'll get neural voices automatically."
+        )
     if audio_error:
         payload["audio_error"] = audio_error
     # Add helpful note if fallback was used
