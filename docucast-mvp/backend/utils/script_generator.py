@@ -141,10 +141,29 @@ def _local_fallback_podcast(text: str, options: dict | None = None) -> str:
     # Strip structural markers from the enriched brief so they aren't narrated
     text = re.sub(r"===[^=\n]+===", " ", text)
     text = re.sub(r"\[(Slide \d+[^\]]*|Code block[^\]]*|[^\]]*truncated[^\]]*|First \d+ pages[^\]]*)\]", " ", text, flags=re.I)
-
+    
+    # Strip out all injected table/image/chart structural text
+    text = re.sub(r"Table on page \d+ with columns \[.*?\] and \d+ rows\.", " ", text, flags=re.I)
+    text = re.sub(r"Key rows:.*?(?=\n\n|\Z)", " ", text, flags=re.I | re.DOTALL)
+    text = re.sub(r"\[Chart on slide \d+\]", " ", text, flags=re.I)
+    text = re.sub(r"\[Image on page \d+\]", " ", text, flags=re.I)
+    
     # Split on sentence boundaries
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    
+    # Keep only clean sentences (avoid ones with too much weird punctuation or formatting)
+    clean_sentences = []
+    for s in sentences:
+        s = s.strip()
+        if len(s) <= 20: continue
+        # If it has weird column/row markers or too many colons, it's probably data, skip it
+        if "column " in s.lower() or "row —" in s.lower() or s.count(":") > 2 or s.count(";") > 2 or s.count("—") > 2:
+            continue
+        # Remove extra whitespace
+        s = re.sub(r'\s+', ' ', s)
+        clean_sentences.append(s)
+        
+    sentences = clean_sentences
     
     if not sentences:
         sentences = [text[:500]]
@@ -314,7 +333,14 @@ def _try_groq(text: str, api_key: str, system_instruction: str = "", max_tokens:
     if not api_key:
         raise ValueError("GROQ_API_KEY not set")
     import requests
-    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"]
+    models_to_try = [
+        "llama-3.3-70b-versatile", 
+        "llama-3.1-8b-instant", 
+        "mixtral-8x7b-32768", 
+        "gemma2-9b-it",
+        "qwen/qwen3.8-27b",
+        "openai/gpt-oss-120b"
+    ]
     prompt = _build_user_prompt(text)
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
@@ -356,13 +382,14 @@ def _try_openrouter(text: str, api_key: str, system_instruction: str = "", max_t
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
     import requests
-    # All these have :free variants
+    # Prioritize the most capable free models first, then fallback to premium if credits exist
     models_to_try = [
         "meta-llama/llama-3.3-70b-instruct:free",
+        "nvidia/llama-3.1-nemotron-70b-instruct:free",
+        "google/gemini-2.0-flash-exp:free",
         "qwen/qwen-2.5-7b-instruct:free",
-        "google/gemma-2-9b-it:free",
-        "mistralai/mistral-7b-instruct:free",
-        "huggingfaceh4/zephyr-7b-beta:free",
+        "anthropic/claude-3.5-sonnet",
+        "openai/gpt-4o",
     ]
     prompt = _build_user_prompt(text)
     headers = {
