@@ -72,50 +72,53 @@ def build_system_instruction(options: dict | None = None) -> str:
     audience = AUDIENCE_PRESETS.get(opts["audience"], AUDIENCE_PRESETS["general"])
 
     common_rules = f"""
-Rules:
-- Explain ONLY what exists in the document brief. Do NOT invent external facts.
-- The brief may include sections for TABLES, GRAPHS & CHARTS, IMAGES, HANDWRITTEN NOTES and SPEAKER NOTES.
-  These are real extracted content — weave the most interesting numbers, trends and visual details into
-  the conversation naturally ("there's a chart showing...", "one table breaks down...", "someone scribbled a note that...").
-  Never read a table cell-by-cell; tell the story the data tells.
-- Include 1-2 relatable analogies.
+Rules for Professional Podcasting:
+- EXPLAIN ONLY what exists in the document brief. Do NOT invent external facts, but DO interpret the facts naturally.
+- Weave in TABLES, GRAPHS, IMAGES, and NOTES smoothly. Never read a table cell-by-cell; tell the story the data tells (e.g., "There's a chart here that spikes massively when...").
+- Use 1-2 brilliant, highly relatable analogies to explain complex ideas.
+- Use natural, spoken-word phrasing. Short sentences. Punchy verbs. Avoid academic jargon unless you immediately explain it in plain English.
 - Target length: {length_desc}.
 - Tone: {tone}.
 - Audience: {audience}.
-- Output PLAIN spoken text only: no markdown, no asterisks, no emoji, no stage directions in brackets.
+- Output PLAIN spoken text only: NO markdown, NO asterisks, NO emoji, NO stage directions in brackets. Just the words to be spoken.
 """
     if opts.get("focus"):
         common_rules += f"- Listener steering request (honor it if the document supports it): {opts['focus'][:300]}\n"
 
     if opts["mode"] == "solo":
         return (
-            "You are a professional podcast narrator turning documents into audio episodes for busy people.\n"
+            "You are a master solo podcast host (think 99% Invisible or NPR) turning a document into an engaging audio episode.\n"
             + common_rules
-            + "- Structure: a hook that earns attention in the first sentence, the main explanation with an analogy, a quick recap.\n"
+            + "- Structure: Start with a cold open hook that grabs attention immediately. Then the main explanation, and finally a crisp recap.\n"
             "- Write as one narrator. Do not prefix lines with a name."
         )
 
     return (
-        f"You are writing a two-host podcast conversation between {HOST_A} (curious, asks sharp questions, "
-        f"reacts naturally) and {HOST_B} (the explainer, grounded in the document, loves a good analogy).\n"
+        f"You are a master scriptwriter writing a premium two-host podcast conversation between {HOST_A} and {HOST_B}.\n"
+        f"- {HOST_A} is the curious guide: asks sharp questions, reacts naturally, and guides the flow.\n"
+        f"- {HOST_B} is the expert explainer: grounded in the document, breaks down complex ideas, and loves a good analogy.\n"
         + common_rules
         + f"""- Format STRICTLY as alternating lines, each starting with the speaker name and a colon:
 {HOST_A}: ...
 {HOST_B}: ...
-- Make it feel like a real conversation: brief reactions ("wait, really?"), follow-up questions, hand-offs.
-- {HOST_A} opens with a hook, {HOST_B} closes with a crisp recap.
-- Keep individual turns short (1-3 sentences)."""
+- Make it sound intensely human: use natural agreements ("Right", "Exactly", "Wow"), brief reactions, and seamless hand-offs.
+- Avoid robotic or cheesy transitions. Let the conversation flow organically.
+- {HOST_A} opens with a compelling hook, {HOST_B} closes with a crisp, memorable takeaway.
+- Keep individual turns short and punchy (1-3 sentences max)."""
     )
-
-
-# Rebound per-request by generate_script_with_provider; module-level so every
-# provider function picks up the current episode settings.
-SYSTEM_INSTRUCTION = build_system_instruction()
 
 
 # The user prompt template
 def _build_user_prompt(text: str) -> str:
     return f"Document brief:\n{text}\n\nGenerate the podcast script now."
+
+
+# Map length preset -> max_output_tokens so deep dives aren't truncated.
+_TOKEN_BUDGET = {
+    "brief": 600,
+    "standard": 1200,
+    "deep": 2000,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +255,7 @@ That's the core of what's inside — no fluff, just what matters. Thanks for lis
 # Provider implementations - each is isolated and import-safe
 # ---------------------------------------------------------------------------
 
-def _try_gemini(text: str, api_key: str) -> str:
+def _try_gemini(text: str, api_key: str, system_instruction: str = "", max_tokens: int = 1200) -> str:
     """Try Gemini. Raises on failure so caller can fallback."""
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set")
@@ -283,9 +286,9 @@ def _try_gemini(text: str, api_key: str) -> str:
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
+                    system_instruction=system_instruction,
                     temperature=0.7,
-                    max_output_tokens=800,
+                    max_output_tokens=max_tokens,
                 ),
             )
             script = (getattr(response, "text", "") or "").strip()
@@ -306,7 +309,7 @@ def _try_gemini(text: str, api_key: str) -> str:
     raise ValueError(f"Gemini failed on all models: {last_err}")
 
 
-def _try_groq(text: str, api_key: str) -> str:
+def _try_groq(text: str, api_key: str, system_instruction: str = "", max_tokens: int = 1200) -> str:
     """Groq - free, 14k req/day, fastest. https://console.groq.com/keys"""
     if not api_key:
         raise ValueError("GROQ_API_KEY not set")
@@ -324,11 +327,11 @@ def _try_groq(text: str, api_key: str) -> str:
                 json={
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "system", "content": system_instruction},
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 800,
+                    "max_tokens": max_tokens,
                 },
                 timeout=30,
             )
@@ -348,7 +351,7 @@ def _try_groq(text: str, api_key: str) -> str:
     raise ValueError(f"Groq failed: {last_err}")
 
 
-def _try_openrouter(text: str, api_key: str) -> str:
+def _try_openrouter(text: str, api_key: str, system_instruction: str = "", max_tokens: int = 1200) -> str:
     """OpenRouter - many FREE models, no credit card. https://openrouter.ai/keys"""
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
@@ -377,11 +380,11 @@ def _try_openrouter(text: str, api_key: str) -> str:
                 json={
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "system", "content": system_instruction},
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 800,
+                    "max_tokens": max_tokens,
                 },
                 timeout=30,
             )
@@ -398,7 +401,7 @@ def _try_openrouter(text: str, api_key: str) -> str:
     raise ValueError(f"OpenRouter failed: {last_err}")
 
 
-def _try_cerebras(text: str, api_key: str) -> str:
+def _try_cerebras(text: str, api_key: str, system_instruction: str = "", max_tokens: int = 1200) -> str:
     """Cerebras - free tier ultra fast. https://cloud.cerebras.ai/"""
     if not api_key:
         raise ValueError("CEREBRAS_API_KEY not set")
@@ -410,11 +413,11 @@ def _try_cerebras(text: str, api_key: str) -> str:
         json={
             "model": "llama3.1-8b",
             "messages": [
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
+                {"role": "system", "content": system_instruction},
                 {"role": "user", "content": _build_user_prompt(text)},
             ],
             "temperature": 0.7,
-            "max_tokens": 800,
+            "max_tokens": max_tokens,
         },
         timeout=30,
     )
@@ -422,7 +425,7 @@ def _try_cerebras(text: str, api_key: str) -> str:
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-def _try_huggingface(text: str, token: str) -> str:
+def _try_huggingface(text: str, token: str, system_instruction: str = "", max_tokens: int = 1200) -> str:
     """Hugging Face Inference - free. https://huggingface.co/settings/tokens"""
     if not token:
         raise ValueError("HF_TOKEN not set")
@@ -433,7 +436,7 @@ def _try_huggingface(text: str, token: str) -> str:
         "HuggingFaceH4/zephyr-7b-beta",
         "google/gemma-2-9b-it",
     ]
-    prompt = f"{SYSTEM_INSTRUCTION}\n\nDocument:\n{text}\n\nPodcast script:"
+    prompt = f"{system_instruction}\n\nDocument:\n{text}\n\nPodcast script:"
     headers = {"Authorization": f"Bearer {token}"}
     last_err = None
     for model in models_to_try:
@@ -443,7 +446,7 @@ def _try_huggingface(text: str, token: str) -> str:
                 headers=headers,
                 json={
                     "inputs": prompt,
-                    "parameters": {"max_new_tokens": 800, "temperature": 0.7, "return_full_text": False},
+                    "parameters": {"max_new_tokens": max_tokens, "temperature": 0.7, "return_full_text": False},
                 },
                 timeout=45,
             )
@@ -466,7 +469,7 @@ def _try_huggingface(text: str, token: str) -> str:
     raise ValueError(f"HuggingFace failed: {last_err}")
 
 
-def _try_ollama(text: str, host: str = None) -> str:
+def _try_ollama(text: str, host: str = None, system_instruction: str = "", max_tokens: int = 1200) -> str:
     """Ollama - 100% free, unlimited, offline. https://ollama.com
     Run: ollama pull llama3.2  &&  ollama serve
     """
@@ -485,7 +488,7 @@ def _try_ollama(text: str, host: str = None) -> str:
     except:
         pass  # Ollama might not be running
 
-    prompt = f"{SYSTEM_INSTRUCTION}\n\n{_build_user_prompt(text)}"
+    prompt = f"{system_instruction}\n\n{_build_user_prompt(text)}"
     last_err = None
     for model in models_to_try:
         try:
@@ -495,7 +498,7 @@ def _try_ollama(text: str, host: str = None) -> str:
                     "model": model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"temperature": 0.7, "num_predict": 800},
+                    "options": {"temperature": 0.7, "num_predict": max_tokens},
                 },
                 timeout=60,
             )
@@ -516,40 +519,48 @@ def _try_ollama(text: str, host: str = None) -> str:
 # Main entry points
 # ---------------------------------------------------------------------------
 
-# Map provider name -> callable
-_PROVIDER_FUNCS = {
-    "gemini": lambda text: _try_gemini(text, os.getenv("GEMINI_API_KEY", "")),
-    "groq": lambda text: _try_groq(text, os.getenv("GROQ_API_KEY", "")),
-    "openrouter": lambda text: _try_openrouter(text, os.getenv("OPENROUTER_API_KEY", "")),
-    "cerebras": lambda text: _try_cerebras(text, os.getenv("CEREBRAS_API_KEY", "")),
-    "huggingface": lambda text: _try_huggingface(text, os.getenv("HF_TOKEN", "") or os.getenv("HUGGINGFACE_API_KEY", "")),
-    "ollama": lambda text: _try_ollama(text, os.getenv("OLLAMA_HOST", "")),
-    "local": lambda text: _local_fallback_podcast(text, _CURRENT_OPTIONS),
-}
-
-# Holds the options for the in-flight request so the local fallback can honor
-# mode/length even when reached through the generic provider chain.
-_CURRENT_OPTIONS: dict = dict(DEFAULT_OPTIONS)
+# Provider name -> list of valid names (for key checks in the dispatch loop).
+_PROVIDER_NAMES = ["gemini", "groq", "openrouter", "cerebras", "huggingface", "ollama", "local"]
 
 # Recommended order for auto - cheap/fast/free first after gemini
 _AUTO_ORDER = ["gemini", "groq", "openrouter", "cerebras", "huggingface", "ollama", "local"]
 
+
 def _get_provider_order() -> list:
-    pref = os.getenv("LLM_PROVIDER", "local").strip().lower()
+    pref = os.getenv("LLM_PROVIDER", "auto").strip().lower()
     if pref == "auto" or pref == "":
-        return _AUTO_ORDER
-    if pref in _PROVIDER_FUNCS:
+        return list(_AUTO_ORDER)
+    if pref in _PROVIDER_NAMES:
         # Put preferred first, then rest (ending with local always)
         order = [pref] + [p for p in _AUTO_ORDER if p != pref]
         return order
     # Support comma-separated list like "groq,ollama,local"
     if "," in pref:
-        parts = [p.strip() for p in pref.split(",") if p.strip() in _PROVIDER_FUNCS]
+        parts = [p.strip() for p in pref.split(",") if p.strip() in _PROVIDER_NAMES]
         if parts:
             # Append remaining not mentioned, ensure local last
             remaining = [p for p in _AUTO_ORDER if p not in parts]
             return parts + remaining
-    return _AUTO_ORDER
+    return list(_AUTO_ORDER)
+
+
+def _dispatch_provider(provider: str, text: str, system_instruction: str, max_tokens: int, options: dict) -> str:
+    """Call the right provider function with per-request params (no shared globals)."""
+    if provider == "gemini":
+        return _try_gemini(text, os.getenv("GEMINI_API_KEY", ""), system_instruction, max_tokens)
+    if provider == "groq":
+        return _try_groq(text, os.getenv("GROQ_API_KEY", ""), system_instruction, max_tokens)
+    if provider == "openrouter":
+        return _try_openrouter(text, os.getenv("OPENROUTER_API_KEY", ""), system_instruction, max_tokens)
+    if provider == "cerebras":
+        return _try_cerebras(text, os.getenv("CEREBRAS_API_KEY", ""), system_instruction, max_tokens)
+    if provider == "huggingface":
+        return _try_huggingface(text, os.getenv("HF_TOKEN", "") or os.getenv("HUGGINGFACE_API_KEY", ""), system_instruction, max_tokens)
+    if provider == "ollama":
+        return _try_ollama(text, os.getenv("OLLAMA_HOST", ""), system_instruction, max_tokens)
+    if provider == "local":
+        return _local_fallback_podcast(text, options)
+    raise ValueError(f"Unknown provider: {provider}")
 
 
 def generate_script_with_provider(text: str, api_key: str = None, options: dict | None = None) -> tuple[str, str]:
@@ -560,9 +571,9 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
     tone, audience, focus.
     api_key param is kept for backward compat - if provided, sets GEMINI_API_KEY for this call.
     """
-    global SYSTEM_INSTRUCTION, _CURRENT_OPTIONS
-    _CURRENT_OPTIONS = {**DEFAULT_OPTIONS, **(options or {})}
-    SYSTEM_INSTRUCTION = build_system_instruction(_CURRENT_OPTIONS)
+    current_options = {**DEFAULT_OPTIONS, **(options or {})}
+    system_instruction = build_system_instruction(current_options)
+    max_tokens = _TOKEN_BUDGET.get(current_options.get("length", "standard"), 1200)
 
     if api_key:
         # Backward compat: if caller passes api_key, treat as Gemini key if none set
@@ -573,9 +584,8 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
     errors = {}
 
     for provider in order:
-        func = _PROVIDER_FUNCS[provider]
         try:
-            # Skip providers with no key except ollama/local which can probed
+            # Skip providers with no key except ollama/local which can be probed
             if provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
                 continue
             if provider == "groq" and not os.getenv("GROQ_API_KEY"):
@@ -588,7 +598,7 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
                 continue
             # ollama and local always tried (ollama will fail quickly if not running)
 
-            script = func(text)
+            script = _dispatch_provider(provider, text, system_instruction, max_tokens, current_options)
             if script and script.strip():
                 return script.strip(), provider
         except Exception as exc:
@@ -598,7 +608,7 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
 
     # Local should never fail - but as absolute safety, call it directly
     try:
-        return _local_fallback_podcast(text, _CURRENT_OPTIONS), "local"
+        return _local_fallback_podcast(text, current_options), "local"
     except Exception as exc:
         raise ValueError(f"All providers failed. Errors: {errors}. Local fallback also failed: {exc}") from exc
 
@@ -615,7 +625,7 @@ def generate_script(text: str, api_key: str = None) -> str:
 def get_available_providers() -> dict:
     """Return dict of provider -> availability info for health checks."""
     info = {}
-    for name in _PROVIDER_FUNCS:
+    for name in _PROVIDER_NAMES:
         if name == "gemini":
             info[name] = bool(os.getenv("GEMINI_API_KEY"))
         elif name == "groq":

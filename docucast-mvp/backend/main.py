@@ -49,21 +49,19 @@ _request_log: dict[str, deque] = defaultdict(deque)
 
 # Allowed CORS origins: Vercel deployment (set via env) + localhost for dev.
 _prod_origin = os.getenv("VERCEL_ORIGIN", "").strip().rstrip("/")
-allow_origins = [
-    origin
-    for origin in [
-        _prod_origin,
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ]
-    if origin
+_dev_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
 ]
-# If no prod origin set, allow all for dev/preview (Arena, Codespaces etc)
-if not allow_origins:
+# When a production origin is configured, restrict CORS to that + localhost.
+# Otherwise (pure dev / preview / tunnel), allow all origins.
+if _prod_origin:
+    allow_origins = [_prod_origin] + _dev_origins
+else:
     allow_origins = ["*"]
 
 app = FastAPI(title="DocuCast", version="2.0.0")
