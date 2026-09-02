@@ -30,42 +30,114 @@ import re
 from collections import Counter
 
 # ---------------------------------------------------------------------------
-# Prompt - same quality as original
+# Steerable podcast options (this is where we out-do NotebookLM: their audio
+# overviews are one-size-fits-all; DocuCast lets listeners pick the show)
 # ---------------------------------------------------------------------------
-SYSTEM_INSTRUCTION = """You are a professional podcast host explaining complex documents to busy professionals.
+LENGTH_PRESETS = {
+    "brief": ("about 250 words (a tight ~2 minute episode)", 250),
+    "standard": ("about 450 words (a ~4 minute episode)", 450),
+    "deep": ("about 800 words (an in-depth ~7 minute episode)", 800),
+}
 
+TONE_PRESETS = {
+    "conversational": "warm, conversational and engaging — like two friends who genuinely find this fascinating",
+    "energetic": "high-energy, punchy and enthusiastic — quick exchanges, excitement about the ideas",
+    "calm": "calm, thoughtful and measured — an unhurried late-night radio feel",
+    "expert": "precise and analytical, but still human — a sharp expert briefing",
+}
+
+AUDIENCE_PRESETS = {
+    "general": "curious general listeners with no background — use simple 8th-grade language",
+    "student": "students studying this topic — define terms, reinforce the concepts they'd be tested on",
+    "expert": "domain experts — skip the basics, focus on methods, numbers, limitations and implications",
+    "executive": "busy executives — lead with the bottom line, decisions and business impact",
+}
+
+DEFAULT_OPTIONS = {
+    "mode": "dialogue",       # dialogue | solo
+    "length": "standard",     # brief | standard | deep
+    "tone": "conversational",
+    "audience": "general",
+    "focus": "",              # optional listener steering, e.g. "focus on the results section"
+}
+
+HOST_A = "NOVA"
+HOST_B = "RHYS"
+
+
+def build_system_instruction(options: dict | None = None) -> str:
+    opts = {**DEFAULT_OPTIONS, **(options or {})}
+    length_desc, _ = LENGTH_PRESETS.get(opts["length"], LENGTH_PRESETS["standard"])
+    tone = TONE_PRESETS.get(opts["tone"], TONE_PRESETS["conversational"])
+    audience = AUDIENCE_PRESETS.get(opts["audience"], AUDIENCE_PRESETS["general"])
+
+    common_rules = f"""
 Rules:
-- Explain ONLY what exists in the document.
-- Do NOT add external facts.
-- Use simple 8th-grade language.
+- Explain ONLY what exists in the document brief. Do NOT invent external facts.
+- The brief may include sections for TABLES, GRAPHS & CHARTS, IMAGES, HANDWRITTEN NOTES and SPEAKER NOTES.
+  These are real extracted content — weave the most interesting numbers, trends and visual details into
+  the conversation naturally ("there's a chart showing...", "one table breaks down...", "someone scribbled a note that...").
+  Never read a table cell-by-cell; tell the story the data tells.
 - Include 1-2 relatable analogies.
-- Format as:
-  Hook/Intro
-  Main Explanation (with analogy)
-  Quick Recap
-- Keep output under 400 words.
-- Tone: Conversational and engaging."""
+- Target length: {length_desc}.
+- Tone: {tone}.
+- Audience: {audience}.
+- Output PLAIN spoken text only: no markdown, no asterisks, no emoji, no stage directions in brackets.
+"""
+    if opts.get("focus"):
+        common_rules += f"- Listener steering request (honor it if the document supports it): {opts['focus'][:300]}\n"
+
+    if opts["mode"] == "solo":
+        return (
+            "You are a professional podcast narrator turning documents into audio episodes for busy people.\n"
+            + common_rules
+            + "- Structure: a hook that earns attention in the first sentence, the main explanation with an analogy, a quick recap.\n"
+            "- Write as one narrator. Do not prefix lines with a name."
+        )
+
+    return (
+        f"You are writing a two-host podcast conversation between {HOST_A} (curious, asks sharp questions, "
+        f"reacts naturally) and {HOST_B} (the explainer, grounded in the document, loves a good analogy).\n"
+        + common_rules
+        + f"""- Format STRICTLY as alternating lines, each starting with the speaker name and a colon:
+{HOST_A}: ...
+{HOST_B}: ...
+- Make it feel like a real conversation: brief reactions ("wait, really?"), follow-up questions, hand-offs.
+- {HOST_A} opens with a hook, {HOST_B} closes with a crisp recap.
+- Keep individual turns short (1-3 sentences)."""
+    )
+
+
+# Rebound per-request by generate_script_with_provider; module-level so every
+# provider function picks up the current episode settings.
+SYSTEM_INSTRUCTION = build_system_instruction()
+
 
 # The user prompt template
 def _build_user_prompt(text: str) -> str:
-    return f"Document:\n{text}\n\nGenerate the podcast script now."
+    return f"Document brief:\n{text}\n\nGenerate the podcast script now."
 
 
 # ---------------------------------------------------------------------------
 # Local fallback - TF based extractive summarizer + podcast template
 # Works with ZERO API, unlimited, offline
 # ---------------------------------------------------------------------------
-def _local_fallback_podcast(text: str) -> str:
+def _local_fallback_podcast(text: str, options: dict | None = None) -> str:
     """Generate a podcast script without any LLM - pure Python.
 
-    Uses word-frequency scoring to pick key sentences, then wraps them
-    in a podcast template with a generic analogy. Quality is lower than
+    Uses word-frequency scoring to pick key sentences, then wraps them in a
+    podcast template (solo or two-host dialogue). Quality is lower than an
     LLM but guarantees the app never fails due to API limits.
     """
+    opts = {**DEFAULT_OPTIONS, **(options or {})}
     # Clean and split into sentences
     text = text.strip()
     if not text:
-        return "Hey there! It looks like we couldn't find much to talk about in this document. Try uploading a PDF with more selectable text."
+        return "Hey there! It looks like we couldn't find much to talk about in this document. Try uploading a file with more readable content."
+
+    # Strip structural markers from the enriched brief so they aren't narrated
+    text = re.sub(r"===[^=\n]+===", " ", text)
+    text = re.sub(r"\[(Slide \d+[^\]]*|Code block[^\]]*|[^\]]*truncated[^\]]*|First \d+ pages[^\]]*)\]", " ", text, flags=re.I)
 
     # Split on sentence boundaries
     sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -130,29 +202,49 @@ def _local_fallback_podcast(text: str) -> str:
 
     middle = " ".join(key_points[1:4]) if len(key_points) > 1 else " ".join(key_points)
     recap = " ".join(key_points[-2:]) if len(key_points) > 2 else key_points[-1]
+    main = " ".join(key_points[:4])
 
-    script = f"""🎙️ Welcome back to DocuCast — where we turn dense documents into quick, human-friendly stories.
+    if opts.get("mode") == "solo":
+        script = f"""Welcome back to DocuCast, where dense documents become quick, human-friendly stories.
 
-**Hook / Intro**
-Ever wondered what this document is *really* saying? Here’s the one-minute version: {intro}
+Ever wondered what this document is really saying? Here's the short version: {intro}
 
-**Main Explanation**
-{ ' '.join(key_points[:4]) }
+{main}
 
-Here’s an analogy to make it stick: {analogy}
+Here's an analogy to make it stick: {analogy}
 
 Zooming out a bit — {middle}
 
-**Quick Recap**
 So, to wrap it up: {recap}
 
-That’s the core of what’s inside the document — no fluff, just what matters. Thanks for listening to DocuCast!
-"""
-    # Keep under ~400 words
+That's the core of what's inside — no fluff, just what matters. Thanks for listening to DocuCast!"""
+    else:
+        mid_points = key_points[1:4] or key_points[:1]
+        qa_lines = []
+        questions = [
+            "Okay, so what's the big idea here?",
+            "Interesting. What else stood out to you?",
+            "And how should we make sense of all that?",
+        ]
+        for i, point in enumerate(mid_points[:3]):
+            qa_lines.append(f"{HOST_A}: {questions[min(i, len(questions) - 1)]}")
+            qa_lines.append(f"{HOST_B}: {point}")
+        qa_block = "\n".join(qa_lines)
+        script = f"""{HOST_A}: Welcome back to DocuCast! Today we're unpacking a document, and honestly, there's more in here than you'd expect.
+{HOST_B}: There really is. Here's the headline: {intro}
+{qa_block}
+{HOST_A}: I like that. Give me something to make it stick.
+{HOST_B}: {analogy}
+{HOST_A}: Perfect. So, bottom line?
+{HOST_B}: {recap} That's the core of it — no fluff, just what matters.
+{HOST_A}: Love it. Thanks for listening to DocuCast!"""
+
+    # Respect the requested length budget
+    _, word_budget = LENGTH_PRESETS.get(opts.get("length", "standard"), LENGTH_PRESETS["standard"])
     words_out = script.split()
-    if len(words_out) > 380:
-        script = " ".join(words_out[:380]) + "..."
-    
+    if len(words_out) > word_budget + 80:
+        script = " ".join(words_out[: word_budget + 80]) + "..."
+
     return script.strip()
 
 
@@ -432,8 +524,12 @@ _PROVIDER_FUNCS = {
     "cerebras": lambda text: _try_cerebras(text, os.getenv("CEREBRAS_API_KEY", "")),
     "huggingface": lambda text: _try_huggingface(text, os.getenv("HF_TOKEN", "") or os.getenv("HUGGINGFACE_API_KEY", "")),
     "ollama": lambda text: _try_ollama(text, os.getenv("OLLAMA_HOST", "")),
-    "local": lambda text: _local_fallback_podcast(text),
+    "local": lambda text: _local_fallback_podcast(text, _CURRENT_OPTIONS),
 }
+
+# Holds the options for the in-flight request so the local fallback can honor
+# mode/length even when reached through the generic provider chain.
+_CURRENT_OPTIONS: dict = dict(DEFAULT_OPTIONS)
 
 # Recommended order for auto - cheap/fast/free first after gemini
 _AUTO_ORDER = ["gemini", "groq", "openrouter", "cerebras", "huggingface", "ollama", "local"]
@@ -456,12 +552,18 @@ def _get_provider_order() -> list:
     return _AUTO_ORDER
 
 
-def generate_script_with_provider(text: str, api_key: str = None) -> tuple[str, str]:
+def generate_script_with_provider(text: str, api_key: str = None, options: dict | None = None) -> tuple[str, str]:
     """Generate script, returning (script, provider_used).
 
     Tries providers in order until one succeeds. Local fallback always succeeds.
+    `options` steers the episode: mode (dialogue|solo), length (brief|standard|deep),
+    tone, audience, focus.
     api_key param is kept for backward compat - if provided, sets GEMINI_API_KEY for this call.
     """
+    global SYSTEM_INSTRUCTION, _CURRENT_OPTIONS
+    _CURRENT_OPTIONS = {**DEFAULT_OPTIONS, **(options or {})}
+    SYSTEM_INSTRUCTION = build_system_instruction(_CURRENT_OPTIONS)
+
     if api_key:
         # Backward compat: if caller passes api_key, treat as Gemini key if none set
         if not os.getenv("GEMINI_API_KEY"):
@@ -496,7 +598,7 @@ def generate_script_with_provider(text: str, api_key: str = None) -> tuple[str, 
 
     # Local should never fail - but as absolute safety, call it directly
     try:
-        return _local_fallback_podcast(text), "local"
+        return _local_fallback_podcast(text, _CURRENT_OPTIONS), "local"
     except Exception as exc:
         raise ValueError(f"All providers failed. Errors: {errors}. Local fallback also failed: {exc}") from exc
 

@@ -1,16 +1,42 @@
-# DocuCast MVP
+# DocuCast
 
-Turn an uploaded PDF into a short, podcast-style audio explanation using AI-generated analogies.
+Turn **PDFs, PPTX decks, Markdown and text files** into a podcast — a real two-host
+conversation (or solo narration) that also covers what's inside your **tables, graphs,
+images, handwritten notes and hidden speaker notes**.
 
-A lean, zero-cost-stack MVP: **React + Vite + TailwindCSS** frontend, **FastAPI + Gemini + Edge-TTS** backend. Now with **free unlimited AI alternatives** when Gemini limits are hit and a **SQLite-backed login database** for auth and registration.
+A lean, zero-cost stack: **React + Vite + TailwindCSS** aurora-glass frontend,
+**FastAPI + multi-provider LLM + 4-engine TTS** backend, with **free unlimited AI
+alternatives** when Gemini limits are hit and a **SQLite-backed login database**.
 
-## ✅ Current Status (Fixed)
+## What's new in 2.0
 
-**The error "The AI service has reached its request limit" is now permanently resolved.**
+- **Multi-format ingest**: `.pdf`, `.pptx`, `.md`, `.txt` (20 MB limit). Legacy `.ppt` gets a friendly re-save message.
+- **Document intelligence** (`utils/document_parser.py`):
+  - PDF tables via pdfplumber (line strategy + guarded text strategy for borderless tables)
+  - PPTX **native chart data** — categories, series values and a trend readout
+  - Embedded images extracted and analyzed (kind guess, OCR, vision description)
+  - Figure/graph/table captions harvested from the text
+  - **Handwritten note detection** via OCR + vision LLM
+  - PPTX **speaker notes** extraction
+  - Everything is merged into an "enriched brief" so the hosts *talk about* the visuals.
+- **Vision pipeline** (`utils/vision.py`): Gemini → OpenRouter free vision models → Ollama (llava),
+  plus pytesseract OCR when the tesseract binary exists. All optional, all graceful.
+- **Steerable episodes**: dialogue/solo · brief/standard/deep · 4 tones · 4 audiences · free-text focus.
+- **Multi-voice TTS with 4-engine fallback** (`utils/tts_engine.py`):
+  Edge-TTS (neural, per-host voices) → gTTS (per-host accents) → Piper (offline neural,
+  drop `.onnx` voices into `backend/voices/`) → espeak-ng (offline via the bundled
+  `espeakng-loader` library — audio can never fail).
+- **Futuristic UI**: dark aurora gradients, frosted glass cards, oversized display type,
+  cinematic scroll reveals, custom audio player (seek/skip/speed/download), speaker-colored
+  transcript, extraction inspector, `prefers-reduced-motion` support and full keyboard access.
 
-- ✅ Created `backend/.env` with `LLM_PROVIDER=local` (unlimited offline mode)
-- ✅ Backend automatically falls back to local summarizer when Gemini quota is reached
-- ✅ System tested and verified working
+## ✅ Current Status
+
+**The error "The AI service has reached its request limit" is permanently resolved.**
+
+- ✅ Backend automatically falls back to the local summarizer when Gemini quota is reached
+- ✅ Audio automatically falls back to fully-offline engines when cloud TTS is unreachable
+- ✅ System tested and verified working end-to-end (PDF, PPTX, MD, TXT)
 
 ---
 
@@ -18,24 +44,26 @@ A lean, zero-cost-stack MVP: **React + Vite + TailwindCSS** frontend, **FastAPI 
 
 ```
 docucast-mvp/
-  frontend/        # React (Vite) + TailwindCSS + Axios
+  frontend/        # React (Vite) + TailwindCSS + Axios — aurora glass UI
     src/
-      App.jsx
+      App.jsx                 # shell, auth, scroll reveals, studio state
       main.jsx
       components/
-        UploadSection.jsx
-        ResultSection.jsx
+        UploadSection.jsx     # drag & drop + episode direction controls
+        ResultSection.jsx     # player, transcript, intelligence panel
   backend/         # FastAPI
-    main.py
-    docucast.db     # created automatically on first run
+    main.py                   # /generate with mode/length/tone/audience/focus
+    docucast.db               # created automatically on first run
+    voices/                   # optional: piper .onnx voices for offline neural TTS
     utils/
       auth.py
-      pdf_parser.py
-      script_generator.py   # <-- multi-provider fallback here
-      tts_engine.py
+      document_parser.py      # PDF/PPTX/MD/TXT + tables/images/charts/handwriting
+      vision.py               # OCR + vision-LLM image understanding
+      pdf_parser.py           # legacy shim
+      script_generator.py     # multi-provider fallback + steerable prompts
+      tts_engine.py           # multi-voice dialogue + 4-engine fallback
     requirements.txt
     .env.example
-    .env                # ← created with LLM_PROVIDER=local
 ```
 
 ---
