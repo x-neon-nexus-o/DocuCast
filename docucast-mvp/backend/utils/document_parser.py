@@ -196,6 +196,8 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
 
     # --- pass 1: pdfplumber for text + tables --------------------------------
     plumber_pages = []
+    flow_pages = []  # stream-order text: cleaner for side-by-side captions in
+    #                  multi-column research papers (layout pass interleaves them)
     try:
         import pdfplumber
 
@@ -208,6 +210,10 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
                 except Exception:
                     page_text = ""
                 plumber_pages.append(page_text)
+                try:
+                    flow_pages.append(page.extract_text(use_text_flow=True) or "")
+                except Exception:
+                    flow_pages.append("")
 
                 # Tables
                 if len(doc.tables) < MAX_TABLES:
@@ -291,8 +297,13 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
 
     text = clean_text("\n".join(plumber_pages))
 
-    # Figure / graph captions from the text itself
-    doc.figures = _extract_figure_captions(plumber_pages)
+    # Figure / graph captions: prefer the stream-order pass (side-by-side
+    # captions stay intact), fall back to the layout pass per page.
+    caption_pages = [
+        flow_pages[i] if i < len(flow_pages) and flow_pages[i].strip() else page_text
+        for i, page_text in enumerate(plumber_pages)
+    ]
+    doc.figures = _extract_figure_captions(caption_pages)
 
     # Handwriting: any image whose OCR/vision result looked handwritten
     for img in doc.images:
