@@ -284,10 +284,8 @@ def _try_gemini(text: str, api_key: str, system_instruction: str = "", max_token
     except ImportError as e:
         raise ValueError(f"google-genai not installed: {e}")
 
-    # Support multiple model names - 3.6-flash doesn't exist yet, fallback to real models
     models_to_try = [
-        os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
-        "gemini-2.0-flash",
+        os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         "gemini-1.5-flash",
         "gemini-1.5-flash-8b",
     ]
@@ -334,12 +332,10 @@ def _try_groq(text: str, api_key: str, system_instruction: str = "", max_tokens:
         raise ValueError("GROQ_API_KEY not set")
     import requests
     models_to_try = [
-        "llama-3.3-70b-versatile", 
-        "llama-3.1-8b-instant", 
-        "mixtral-8x7b-32768", 
+        os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "llama-3.1-8b-instant",
         "gemma2-9b-it",
-        "qwen/qwen3.8-27b",
-        "openai/gpt-oss-120b"
+        "openai/gpt-oss-120b",
     ]
     prompt = _build_user_prompt(text)
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -549,6 +545,10 @@ def _try_ollama(text: str, host: str = None, system_instruction: str = "", max_t
 # Provider name -> list of valid names (for key checks in the dispatch loop).
 _PROVIDER_NAMES = ["gemini", "groq", "openrouter", "cerebras", "huggingface", "ollama", "local"]
 
+# Per-call Gemini key (backward-compat `api_key` argument) — used without
+# mutating the process-wide environment.
+_EXPLICIT_GEMINI_KEY: str | None = None
+
 # Recommended order for auto - cheap/fast/free first after gemini
 _AUTO_ORDER = ["gemini", "groq", "openrouter", "cerebras", "huggingface", "ollama", "local"]
 
@@ -574,7 +574,12 @@ def _get_provider_order() -> list:
 def _dispatch_provider(provider: str, text: str, system_instruction: str, max_tokens: int, options: dict) -> str:
     """Call the right provider function with per-request params (no shared globals)."""
     if provider == "gemini":
-        return _try_gemini(text, os.getenv("GEMINI_API_KEY", ""), system_instruction, max_tokens)
+        return _try_gemini(
+            text,
+            os.getenv("GEMINI_API_KEY", "") or _EXPLICIT_GEMINI_KEY or "",
+            system_instruction,
+            max_tokens,
+        )
     if provider == "groq":
         return _try_groq(text, os.getenv("GROQ_API_KEY", ""), system_instruction, max_tokens)
     if provider == "openrouter":
@@ -596,16 +601,15 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
     Tries providers in order until one succeeds. Local fallback always succeeds.
     `options` steers the episode: mode (dialogue|solo), length (brief|standard|deep),
     tone, audience, focus.
-    api_key param is kept for backward compat - if provided, sets GEMINI_API_KEY for this call.
+    api_key param is kept for backward compat - if provided, it is used as the
+    Gemini key for this call (without touching the process environment).
     """
+    global _EXPLICIT_GEMINI_KEY
     current_options = {**DEFAULT_OPTIONS, **(options or {})}
     system_instruction = build_system_instruction(current_options)
     max_tokens = _TOKEN_BUDGET.get(current_options.get("length", "standard"), 1200)
 
-    if api_key:
-        # Backward compat: if caller passes api_key, treat as Gemini key if none set
-        if not os.getenv("GEMINI_API_KEY"):
-            os.environ["GEMINI_API_KEY"] = api_key
+    _EXPLICIT_GEMINI_KEY = api_key
 
     order = _get_provider_order()
     errors = {}
@@ -613,7 +617,7 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
     for provider in order:
         try:
             # Skip providers with no key except ollama/local which can be probed
-            if provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
+            if provider == "gemini" and not (os.getenv("GEMINI_API_KEY") or _EXPLICIT_GEMINI_KEY):
                 continue
             if provider == "groq" and not os.getenv("GROQ_API_KEY"):
                 continue

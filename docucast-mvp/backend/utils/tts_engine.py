@@ -56,7 +56,9 @@ _SPEAKER_ALIASES = {
     "GUEST": "RHYS", "SAM": "RHYS", "B": "RHYS",
 }
 
-MAX_SEGMENTS = 60
+# Generous cap: a "deep" dialogue script is ~60-80 short turns. Beyond this,
+# remaining turns are dropped from audio only — synthesize fewer, longer turns.
+MAX_SEGMENTS = 120
 
 
 def sanitize_for_speech(text: str) -> str:

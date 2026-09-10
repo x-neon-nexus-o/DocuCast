@@ -15,9 +15,9 @@ export default {
           teal: "#2dd4bf",
           magenta: "#f472b6",
         },
-        ink: "#e7e9f5",
-        dim: "#9aa2c0",
-        faint: "#5d6484",
+        ink: "var(--text-ink)",
+        dim: "var(--text-dim)",
+        faint: "var(--text-faint)",
         // Legacy aliases (kept so nothing breaks)
         dcBg: "#05060f",
         dcCard: "rgba(255,255,255,0.04)",

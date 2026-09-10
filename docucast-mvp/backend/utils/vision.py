@@ -19,9 +19,11 @@ import json
 import os
 import re
 import shutil
+from collections import OrderedDict
 from typing import Optional
 
-_VISION_CACHE: dict[str, Optional[dict]] = {}
+_VISION_CACHE: OrderedDict[str, Optional[dict]] = OrderedDict()
+_VISION_CACHE_MAX = 128
 _VISION_DISABLED = False  # trips after repeated hard failures to avoid slow uploads
 _VISION_FAILURES = 0
 _MAX_VISION_FAILURES = 3
@@ -96,6 +98,7 @@ def describe_image(image_bytes: bytes, context_hint: str = "") -> Optional[dict]
 
     key = hashlib.sha1(image_bytes[:65536]).hexdigest()
     if key in _VISION_CACHE:
+        _VISION_CACHE.move_to_end(key)
         return _VISION_CACHE[key]
 
     result = None
@@ -115,6 +118,8 @@ def describe_image(image_bytes: bytes, context_hint: str = "") -> Optional[dict]
             _VISION_DISABLED = True
 
     _VISION_CACHE[key] = result
+    while len(_VISION_CACHE) > _VISION_CACHE_MAX:
+        _VISION_CACHE.popitem(last=False)
     return result
 
 

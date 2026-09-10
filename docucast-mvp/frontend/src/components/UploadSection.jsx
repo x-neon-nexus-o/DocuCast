@@ -51,6 +51,14 @@ const STUDIO_GROUPS = [
   },
 ];
 
+// One-tap focus presets — clicking sets the text; clicking the active one clears.
+const FOCUS_PRESETS = [
+  { label: "Key results", text: "spend most time on the key results and what they mean" },
+  { label: "Limitations", text: "focus on limitations, caveats and open questions" },
+  { label: "Business impact", text: "lead with the business impact and practical takeaways" },
+  { label: "Methods & data", text: "walk through the methods and the data behind the claims" },
+];
+
 function extOf(name = "") {
   const parts = name.toLowerCase().split(".");
   return parts.length > 1 ? parts.pop() : "";
@@ -66,34 +74,47 @@ export default function UploadSection({
   loadingMessage,
   stageIndex = 0,
   stageCount = 1,
+  elapsedSeconds = 0,
+  retryAfterSeconds = 0,
 }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState("");
   const [showTuning, setShowTuning] = useState(false);
+  const [fileValid, setFileValid] = useState(false);
 
   const acceptFile = useCallback(
     (candidate) => {
       setFileError("");
-      if (!candidate) return;
+      setFileValid(false);
+      if (!candidate) {
+        setFile(null);
+        return false;
+      }
       const ext = "." + extOf(candidate.name);
       if (candidate.name.toLowerCase().endsWith(".ppt")) {
         setFileError("Legacy .ppt isn't supported — re-save the deck as .pptx and try again.");
-        return;
+        setFile(null);
+        return false;
       }
       if (!ACCEPTED_EXTENSIONS.includes(ext)) {
         setFileError(`"${ext}" isn't supported yet. Use ${ACCEPTED_EXTENSIONS.join(", ")}.`);
-        return;
+        setFile(null);
+        return false;
       }
       if (candidate.size > MAX_SIZE_MB * 1024 * 1024) {
         setFileError(`That file is ${(candidate.size / (1024 * 1024)).toFixed(1)} MB — the limit is ${MAX_SIZE_MB} MB.`);
-        return;
+        setFile(null);
+        return false;
       }
       if (candidate.size === 0) {
         setFileError("That file looks empty.");
-        return;
+        setFile(null);
+        return false;
       }
       setFile(candidate);
+      setFileValid(true);
+      return true;
     },
     [setFile],
   );
@@ -110,8 +131,9 @@ export default function UploadSection({
     acceptFile(e.dataTransfer?.files?.[0] || null);
   };
 
-  const canGenerate = !!file && !loading;
+  const canGenerate = !!file && !loading && retryAfterSeconds === 0;
   const meta = file ? FILE_META[extOf(file.name)] : null;
+  const elapsedLabel = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
 
   return (
     <section aria-label="Create a podcast" className="glass rounded-[1.75rem] p-5 sm:p-7 shadow-glass">
@@ -141,8 +163,11 @@ export default function UploadSection({
       >
         {file ? (
           <>
-            <span className={`text-4xl ${meta?.tint || "text-aurora-violet"}`} aria-hidden="true">
+            <span className={`text-4xl ${meta?.tint || "text-aurora-violet"} ${fileValid ? "animate-pulse" : ""}`} aria-hidden="true">
               {meta?.glyph || "◰"}
+              {fileValid && (
+                <span className="absolute -right-2 -top-2 w-3 h-3 bg-green-500 rounded-full border-2 border-white/20 animate-pulse" aria-hidden="true" />
+              )}
             </span>
             <div>
               <p className="font-display font-semibold text-ink break-all">{file.name}</p>
@@ -249,6 +274,28 @@ export default function UploadSection({
                 placeholder='e.g. "spend most time on the results and limitations"'
                 className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-cyan/50 focus:border-transparent"
               />
+              <div className="mt-2 flex flex-wrap gap-2">
+                {FOCUS_PRESETS.map((preset) => {
+                  const active = studio.focus === preset.text;
+                  return (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      aria-pressed={active}
+                      title={active ? "Click again to clear" : preset.text}
+                      onClick={() =>
+                        setStudio((s) => ({ ...s, focus: active ? "" : preset.text }))
+                      }
+                      className={`rounded-full px-3 py-1 text-[11px] font-semibold transition-all duration-200 border
+                        ${active
+                          ? "bg-aurora-cyan/20 text-cyan-200 border-aurora-cyan/50"
+                          : "border-white/10 bg-white/[0.03] text-dim hover:text-ink hover:border-white/25"}`}
+                    >
+                      {active ? "✓ " : "+ "}{preset.label}
+                    </button>
+                  );
+                })}
+              </div>
             </label>
           </div>
         )}
@@ -266,6 +313,11 @@ export default function UploadSection({
             <>
               <Spinner />
               Producing your episode…
+            </>
+          ) : retryAfterSeconds > 0 ? (
+            <>
+              <span aria-hidden="true">⏳</span>
+              Rate limited — retry in {retryAfterSeconds}s
             </>
           ) : (
             <>
@@ -299,7 +351,9 @@ export default function UploadSection({
               ))}
             </span>
             <div className="flex-1">
-              <p className="text-sm font-medium text-ink">{loadingMessage}</p>
+              <p className="text-sm font-medium text-ink">
+                {loadingMessage} <span className="tabular-nums text-dim font-normal">· {elapsedLabel}</span>
+              </p>
               <p className="mt-0.5 text-xs text-dim">
                 Longer documents and deep dives can take a couple of minutes.
               </p>

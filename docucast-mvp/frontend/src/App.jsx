@@ -2,9 +2,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import UploadSection from "./components/UploadSection.jsx";
 import ResultSection from "./components/ResultSection.jsx";
+import HistorySection from "./components/HistorySection.jsx";
+import HalftoneFlow from "./components/HalftoneFlow.jsx";
 
 const API_URL = import.meta.env.VITE_API_URL || "/api";
 const TOKEN_KEY = "docucast_access_token";
+const STUDIO_KEY = "docucast_studio_prefs";
+const THEME_KEY = "docucast_theme";
+
+// Apply the theme attribute before first paint wherever possible.
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+}
+
+function loadTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === "light" || saved === "dark") return saved;
+  } catch {
+    /* storage unavailable */
+  }
+  return "dark"; // dark-first design; default stays dark
+}
 
 // Cycled loading messages. The backend runs synchronously in one request, so
 // these are a timed UI sequence, NOT real server progress.
@@ -27,14 +46,54 @@ export const DEFAULT_STUDIO = {
 };
 
 /* ------------------------------------------------------------------ */
-/* Ambient aurora backdrop                                             */
+// Restore saved studio preferences, keeping only known-good values.
+function loadStudioPrefs() {
+  try {
+    const raw = localStorage.getItem(STUDIO_KEY);
+    if (!raw) return DEFAULT_STUDIO;
+    const saved = JSON.parse(raw);
+    const valid = {
+      mode: ["dialogue", "solo"],
+      length: ["brief", "standard", "deep"],
+      tone: ["conversational", "energetic", "calm", "expert"],
+      audience: ["general", "student", "expert", "executive"],
+    };
+    const merged = { ...DEFAULT_STUDIO };
+    for (const [key, allowed] of Object.entries(valid)) {
+      if (allowed.includes(saved[key])) merged[key] = saved[key];
+    }
+    if (typeof saved.focus === "string") merged.focus = saved.focus.slice(0, 300);
+    return merged;
+  } catch {
+    return DEFAULT_STUDIO;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Ambient backdrop: WebGL halftone flow over the aurora field          */
+/* (the aurora gradient stays as the non-WebGL fallback layer)        */
 /* ------------------------------------------------------------------ */
 function AuroraBackdrop() {
+  const [reducedMotion, setReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handleChange = (e) => setReducedMotion(e.matches);
+    setReducedMotion(mediaQuery.matches);
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
+
   return (
     <div className="aurora-field" aria-hidden="true">
-      <div className="aurora-blob aurora-blob--violet animate-drift" />
-      <div className="aurora-blob aurora-blob--cyan animate-drift-alt" />
-      <div className="aurora-blob aurora-blob--magenta animate-drift" style={{ animationDelay: "-9s" }} />
+      {!reducedMotion && (
+        <>
+          <div className="aurora-blob aurora-blob--violet animate-drift" />
+          <div className="aurora-blob aurora-blob--cyan animate-drift-alt" />
+          <div className="aurora-blob aurora-blob--magenta animate-drift" style={{ animationDelay: "-9s" }} />
+        </>
+      )}
+      <HalftoneFlow className="halftone-canvas" />
     </div>
   );
 }
@@ -99,12 +158,18 @@ export default function App() {
   const [credentials, setCredentials] = useState({ username: "", password: "" });
   const [loginLoading, setLoginLoading] = useState(false);
   const [file, setFile] = useState(null);
-  const [studio, setStudio] = useState(DEFAULT_STUDIO);
+  const [studio, setStudio] = useState(loadStudioPrefs);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [stageIndex, setStageIndex] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState(0);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [theme, setTheme] = useState(loadTheme);
   const intervalRef = useRef(null);
+  const elapsedRef = useRef(null);
   const resultRef = useRef(null);
 
   const clearSession = useCallback(() => {
@@ -148,16 +213,45 @@ export default function App() {
     };
   }, [clearSession]);
 
-  // Cycle the loading-stage text while a request is in flight.
+  // Persist studio preferences whenever they change.
+  useEffect(() => {
+    try {
+      localStorage.setItem(STUDIO_KEY, JSON.stringify(studio));
+    } catch {
+      /* storage unavailable */
+    }
+  }, [studio]);
+
+  // Apply + persist the theme whenever it changes.
+  useEffect(() => {
+    applyTheme(theme);
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [theme]);
+
+  // Cycle the loading-stage text while a request is in flight, and show a
+  // real elapsed timer (the backend gives no progress events — this is honest
+  // "how long has it been", not fake progress).
   useEffect(() => {
     if (loading) {
       setStageIndex(0);
+      setElapsedSeconds(0);
       intervalRef.current = setInterval(() => {
         setStageIndex((i) => Math.min(i + 1, LOADING_STAGES.length - 1));
       }, STAGE_INTERVAL_MS);
-      return () => clearInterval(intervalRef.current);
+      elapsedRef.current = setInterval(() => {
+        setElapsedSeconds((s) => s + 1);
+      }, 1000);
+      return () => {
+        clearInterval(intervalRef.current);
+        clearInterval(elapsedRef.current);
+      };
     }
     clearInterval(intervalRef.current);
+    clearInterval(elapsedRef.current);
     return undefined;
   }, [loading]);
 
@@ -199,8 +293,15 @@ export default function App() {
     clearSession();
   }, [clearSession]);
 
+  // Count down a 429 retry window so the button re-enables visibly.
+  useEffect(() => {
+    if (retryAfterSeconds <= 0) return undefined;
+    const t = setInterval(() => setRetryAfterSeconds((s) => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [retryAfterSeconds > 0]);
+
   const handleGenerate = useCallback(async () => {
-    if (!file) return;
+    if (!file || retryAfterSeconds > 0) return;
     setLoading(true);
     setError("");
     setResult(null);
@@ -222,12 +323,17 @@ export default function App() {
         timeout: REQUEST_TIMEOUT_MS,
       });
       setResult(data);
+      setHistoryRefreshKey((k) => k + 1); // new episode saved — refresh history
     } catch (err) {
       const message =
         err?.response?.data?.detail ||
         err?.response?.data?.error ||
         err?.message ||
         "Something went wrong. Please try again.";
+      if (err?.response?.status === 429) {
+        const match = message.match(/in (\d+) seconds?/i);
+        setRetryAfterSeconds(match ? parseInt(match[1], 10) : 60);
+      }
       if (err?.response?.status === 401) {
         clearSession();
         setAuthError(message);
@@ -383,11 +489,42 @@ export default function App() {
               </span>
               <button
                 type="button"
-                onClick={handleLogout}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-semibold text-dim transition-all hover:text-ink hover:border-aurora-magenta/50"
+                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-semibold text-dim transition-all hover:text-ink hover:border-aurora-cyan/50"
               >
-                Log out
+                {theme === "dark" ? "☾" : "☀"}
               </button>
+              {showLogoutConfirm ? (
+                <div className="flex flex-col items-center gap-2 px-4 py-2 bg-white/[0.05] rounded-xl">
+                  <p className="text-xs font-semibold text-dim">Are you sure you want to log out?</p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowLogoutConfirm(false)}
+                      className="px-3 py-1 text-xs font-semibold text-dim border border-white/10 bg-white/[0.03] hover:text-ink hover:border-white/25"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="btn-aurora px-3 py-1 text-xs font-semibold"
+                    >
+                      Yes, logout
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowLogoutConfirm(true)}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-semibold text-dim transition-all hover:text-ink hover:border-aurora-magenta/50"
+                >
+                  Log out
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -428,6 +565,8 @@ export default function App() {
               loadingMessage={LOADING_STAGES[stageIndex]}
               stageIndex={stageIndex}
               stageCount={LOADING_STAGES.length}
+              elapsedSeconds={elapsedSeconds}
+              retryAfterSeconds={retryAfterSeconds}
             />
           </Reveal>
 
@@ -457,6 +596,20 @@ export default function App() {
               />
             )}
           </div>
+
+          {/* Saved episodes */}
+          <Reveal delay={80}>
+            <HistorySection
+              authToken={authToken}
+              refreshKey={historyRefreshKey}
+              onOpenEpisode={(episode) => {
+                setResult(episode);
+                if (resultRef.current) {
+                  resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+              }}
+            />
+          </Reveal>
 
           {/* Why DocuCast strip */}
           {!result && !loading && (

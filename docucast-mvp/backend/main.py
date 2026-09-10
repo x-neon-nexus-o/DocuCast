@@ -1,13 +1,16 @@
 """FastAPI entrypoint for DocuCast MVP - with free unlimited AI alternatives."""
 
 import base64
+import json
 import os
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -15,10 +18,14 @@ from pydantic import BaseModel
 from utils.auth import (
     authenticate_user,
     create_session,
+    delete_episode,
     ensure_user,
+    get_episode,
     initialize_database,
+    list_episodes,
     register_user,
     revoke_session,
+    save_episode,
     verify_session,
 )
 from utils.document_parser import SUPPORTED_EXTENSIONS, parse_document
@@ -44,8 +51,14 @@ ALLOWED_CONTENT_TYPES = {
 
 # Simple per-IP in-memory throttle: max N requests within WINDOW seconds.
 THROTTLE_MAX_REQUESTS = 5
+AUTH_THROTTLE_MAX_REQUESTS = 10
 THROTTLE_WINDOW_SECONDS = 60
+THROTTLE_MAX_TRACKED_IPS = 10_000
 _request_log: dict[str, deque] = defaultdict(deque)
+
+# Set ALLOW_REGISTRATION=false to close open sign-up (the backend proxies your
+# LLM API keys, so public deployments should disable it).
+ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "true").strip().lower() not in {"0", "false", "no"}
 
 # Allowed CORS origins: Vercel deployment (set via env) + localhost for dev.
 _prod_origin = os.getenv("VERCEL_ORIGIN", "").strip().rstrip("/")
@@ -64,16 +77,6 @@ if _prod_origin:
 else:
     allow_origins = ["*"]
 
-app = FastAPI(title="DocuCast", version="2.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allow_origins if allow_origins != ["*"] else ["*"],
-    allow_credentials=True if allow_origins != ["*"] else False,
-    allow_methods=["POST", "GET", "OPTIONS"],
-    allow_headers=["*"],
-)
-
 AUTH_USERNAME = os.getenv("DOCUCAST_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("DOCUCAST_PASSWORD", "docucast")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DOCUCAST_TOKEN_TTL_SECONDS", "43200"))
@@ -89,10 +92,22 @@ class RegisterRequest(BaseModel):
     password: str
 
 
-@app.on_event("startup")
-def _startup() -> None:
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
     initialize_database()
     ensure_user(AUTH_USERNAME, AUTH_PASSWORD)
+    yield
+
+
+app = FastAPI(title="DocuCast", version="2.0.0", lifespan=_lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins if allow_origins != ["*"] else ["*"],
+    allow_credentials=True if allow_origins != ["*"] else False,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 def _client_ip(request: Request) -> str:
@@ -102,12 +117,15 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _check_throttle(ip: str) -> None:
+def _check_throttle(ip: str, max_requests: int = THROTTLE_MAX_REQUESTS) -> None:
     now = time.time()
+    # Bound tracked IPs so a flood of spoofed addresses can't grow memory forever.
+    if ip not in _request_log and len(_request_log) >= THROTTLE_MAX_TRACKED_IPS:
+        _request_log.pop(next(iter(_request_log)))
     log = _request_log[ip]
     while log and now - log[0] > THROTTLE_WINDOW_SECONDS:
         log.popleft()
-    if len(log) >= THROTTLE_MAX_REQUESTS:
+    if len(log) >= max_requests:
         retry_after = int(THROTTLE_WINDOW_SECONDS - (now - log[0])) + 1
         raise HTTPException(
             status_code=429,
@@ -129,20 +147,24 @@ def _require_user(authorization: Optional[str] = Header(default=None)) -> str:
 
 
 @app.post("/auth/login")
-def login(payload: LoginRequest) -> dict:
+def login(payload: LoginRequest, request: Request) -> dict:
+    _check_throttle(_client_ip(request), max_requests=AUTH_THROTTLE_MAX_REQUESTS)
     if not authenticate_user(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-    access_token = create_session(payload.username, AUTH_TOKEN_TTL_SECONDS)
+    access_token = create_session(payload.username.strip(), AUTH_TOKEN_TTL_SECONDS)
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": {"username": payload.username},
+        "user": {"username": payload.username.strip()},
     }
 
 
 @app.post("/auth/register")
-def register(payload: RegisterRequest) -> dict:
+def register(payload: RegisterRequest, request: Request) -> dict:
+    if not ALLOW_REGISTRATION:
+        raise HTTPException(status_code=403, detail="Registration is disabled on this server.")
+    _check_throttle(_client_ip(request), max_requests=AUTH_THROTTLE_MAX_REQUESTS)
     try:
         register_user(payload.username, payload.password)
     except ValueError as exc:
@@ -260,8 +282,10 @@ async def generate(
     }
 
     # --- Parse document: text + tables + images + charts + handwriting ---------
+    # Parsing, LLM calls and TTS are all synchronous and slow — run them in the
+    # threadpool so one long generate request never blocks the event loop.
     try:
-        parsed = parse_document(file_bytes, filename)
+        parsed = await run_in_threadpool(parse_document, file_bytes, filename)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -276,7 +300,9 @@ async def generate(
 
     # --- Generate script (Multi-provider with automatic fallback) -----------
     try:
-        script, provider_used = generate_script_with_provider(enriched, options=options)
+        script, provider_used = await run_in_threadpool(
+            generate_script_with_provider, enriched, None, options
+        )
     except ValueError as exc:
         msg = str(exc)
         if "quota" in msg.lower() or "limit" in msg.lower() or "429" in msg:
@@ -293,7 +319,8 @@ async def generate(
     audio_engine: Optional[str] = None
     audio_mime: Optional[str] = None
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_result = await run_in_threadpool(generate_audio, script)
+        audio_bytes, audio_engine, audio_mime = audio_result
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
@@ -323,4 +350,50 @@ async def generate(
     elif provider_used != "gemini":
         payload["provider_note"] = f"Generated with {provider_used} (Gemini alternative) - free tier."
 
+    # --- Persist to the user's history (best-effort; never fails the request) --
+    episode_id: Optional[int] = None
+    try:
+        episode_id = save_episode(current_user, {
+            "filename": filename,
+            "doc_type": parsed.doc_type,
+            "mode": options["mode"],
+            "length": options["length"],
+            "tone": options["tone"],
+            "audience": options["audience"],
+            "focus": options["focus"],
+            "provider": provider_used,
+            "audio_engine": audio_engine,
+            "audio_mime": audio_mime,
+            "script": script,
+            "audio_base64": audio_base64,
+            "analysis_json": json.dumps(parsed.summary_payload()),
+        })
+        payload["episode_id"] = episode_id
+    except Exception as exc:  # history is a nicety, not a requirement
+        payload["history_error"] = f"Episode could not be saved to history: {exc}"
+
     return JSONResponse(status_code=200, content=payload)
+
+
+@app.get("/episodes")
+def episodes_list(
+    current_user: str = Depends(_require_user),
+    limit: int = 50,
+) -> dict:
+    limit = max(1, min(limit, 100))
+    return {"episodes": list_episodes(current_user, limit=limit)}
+
+
+@app.get("/episodes/{episode_id}")
+def episodes_get(episode_id: int, current_user: str = Depends(_require_user)) -> dict:
+    episode = get_episode(current_user, episode_id)
+    if episode is None:
+        raise HTTPException(status_code=404, detail="Episode not found.")
+    return episode
+
+
+@app.delete("/episodes/{episode_id}")
+def episodes_delete(episode_id: int, current_user: str = Depends(_require_user)) -> dict:
+    if not delete_episode(current_user, episode_id):
+        raise HTTPException(status_code=404, detail="Episode not found.")
+    return {"deleted": True}

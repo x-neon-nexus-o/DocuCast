@@ -6,6 +6,39 @@
   color-scheme: dark;
 }
 
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* Theme tokens — dark defaults, overridden under [data-theme="light"] */
+:root {
+  --bg-page: #05060f;
+  --text-ink: #e7e9f5;
+  --text-dim: #9aa2c0;
+  --text-faint: #5d6484;
+  --glass-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025));
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-deep-bg: linear-gradient(160deg, rgba(10, 12, 28, 0.75), rgba(6, 7, 18, 0.6));
+  --glass-deep-border: rgba(255, 255, 255, 0.08);
+  --panel-bg: rgba(0, 0, 0, 0.25);
+  --halftone-opacity: 0.22;
+  --aurora-field-bg: radial-gradient(ellipse 80% 55% at 50% -12%, rgba(99, 102, 241, 0.16), transparent 60%), #05060f;
+}
+
+html[data-theme="light"] {
+  --bg-page: #f3f4fa;
+  --text-ink: #1a1c2e;
+  --text-dim: #4a5170;
+  --text-faint: #767da0;
+  --glass-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.6));
+  --glass-border: rgba(20, 24, 60, 0.12);
+  --glass-deep-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(240, 242, 252, 0.85));
+  --glass-deep-border: rgba(20, 24, 60, 0.12);
+  --panel-bg: rgba(20, 24, 60, 0.05);
+  --halftone-opacity: 0.1;
+  --aurora-field-bg: radial-gradient(ellipse 80% 55% at 50% -12%, rgba(99, 102, 241, 0.14), transparent 60%), #f3f4fa;
+}
+
 html,
 body,
 #root {
@@ -18,12 +51,13 @@ html {
 
 body {
   margin: 0;
-  background-color: #05060f;
-  color: #e7e9f5;
+  background-color: var(--bg-page);
+  color: var(--text-ink);
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 ::selection {
@@ -39,9 +73,7 @@ body {
   inset: 0;
   z-index: -2;
   overflow: hidden;
-  background:
-    radial-gradient(ellipse 80% 55% at 50% -12%, rgba(99, 102, 241, 0.16), transparent 60%),
-    #05060f;
+  background: var(--aurora-field-bg);
 }
 
 .aurora-blob {
@@ -85,23 +117,46 @@ body {
   pointer-events: none;
 }
 
+/* WebGL halftone-flow canvas: above the aurora blobs, below the grain,
+   heavily dimmed so glass panels keep their contrast. */
+.halftone-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: var(--halftone-opacity);
+  pointer-events: none;
+}
+
+html[data-theme="light"] .halftone-canvas {
+  filter: invert(1);
+}
+
 /* ------------------------------------------------------------------ */
 /* Glassmorphism primitives                                            */
 /* ------------------------------------------------------------------ */
 .glass {
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025));
+  background: var(--glass-bg);
   backdrop-filter: blur(22px) saturate(140%);
   -webkit-backdrop-filter: blur(22px) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--glass-border);
   box-shadow: 0 8px 40px rgba(3, 4, 12, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
+html[data-theme="light"] .glass {
+  box-shadow: 0 8px 32px rgba(40, 45, 90, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
 .glass-deep {
-  background: linear-gradient(160deg, rgba(10, 12, 28, 0.75), rgba(6, 7, 18, 0.6));
+  background: var(--glass-deep-bg);
   backdrop-filter: blur(26px) saturate(140%);
   -webkit-backdrop-filter: blur(26px) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--glass-deep-border);
   box-shadow: 0 8px 40px rgba(3, 4, 12, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+html[data-theme="light"] .glass-deep {
+  box-shadow: 0 8px 32px rgba(40, 45, 90, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .glass-hover {
@@ -279,5 +334,9 @@ input[type="range"].seek::-moz-range-thumb {
 
   .aurora-blob {
     animation: none !important;
+  }
+
+  .halftone-canvas {
+    opacity: 0.16;
   }
 }

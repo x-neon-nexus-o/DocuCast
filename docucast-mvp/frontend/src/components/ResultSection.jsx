@@ -37,6 +37,131 @@ function formatTime(seconds) {
 /* ------------------------------------------------------------------ */
 /* Custom audio player                                                 */
 /* ------------------------------------------------------------------ */
+/**
+ * Static waveform rendered once from the decoded audio via Web Audio's
+ * decodeAudioData, then overlaid with a playhead fill synced to currentTime.
+ * Falls back to the plain range input when Web Audio is unavailable.
+ */
+function WaveformSeek({ audioSrc, duration, current, playing, onSeek }) {
+  const canvasRef = useRef(null);
+  const [peaks, setPeaks] = useState(null);
+
+  // Decode the audio once per src and compute min/max peaks per bucket.
+  useEffect(() => {
+    if (!audioSrc) return undefined;
+    let isActive = true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return undefined;
+
+    fetch(audioSrc)
+      .then((res) => res.arrayBuffer())
+      .then((buf) => new AC().decodeAudioData(buf))
+      .then((audioBuf) => {
+        if (!isActive) return;
+        const data = audioBuf.getChannelData(0);
+        const BUCKETS = 160;
+        const bucketSize = Math.max(1, Math.floor(data.length / BUCKETS));
+        const out = [];
+        for (let b = 0; b < BUCKETS; b++) {
+          let peak = 0;
+          const start = b * bucketSize;
+          const end = Math.min(start + bucketSize, data.length);
+          for (let i = start; i < end; i += 4) { // sample every 4th frame
+            const v = Math.abs(data[i]);
+            if (v > peak) peak = v;
+          }
+          out.push(peak);
+        }
+        const max = Math.max(...out, 0.01);
+        setPeaks(out.map((p) => p / max));
+      })
+      .catch(() => {
+        /* keep null → fallback slider */
+      });
+    return () => {
+      isActive = false;
+    };
+  }, [audioSrc]);
+
+  // Draw on every current-time update.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !peaks) return;
+    const ctx = canvas.getContext("2d");
+    const w = (canvas.width = canvas.clientWidth * 2); // 2x for crispness
+    const h = (canvas.height = canvas.clientHeight * 2);
+    const progress = duration ? current / duration : 0;
+
+    ctx.clearRect(0, 0, w, h);
+    const barW = w / peaks.length;
+    peaks.forEach((p, i) => {
+      const barH = Math.max(3, p * (h - 4));
+      const x = i * barW;
+      const played = i / peaks.length <= progress;
+      ctx.fillStyle = played ? "#8b5cf6" : "rgba(154, 162, 192, 0.35)";
+      // Gradient on the played head for the aurora feel
+      if (played) {
+        const grad = ctx.createLinearGradient(0, 0, w, 0);
+        grad.addColorStop(0, "#8b5cf6");
+        grad.addColorStop(1, "#22d3ee");
+        ctx.fillStyle = grad;
+      }
+      ctx.beginPath();
+      const r = Math.min(2, barW / 3);
+      const bw = Math.max(1.5, barW * 0.55);
+      const y = (h - barH) / 2;
+      ctx.roundRect ? ctx.roundRect(x + (barW - bw) / 2, y, bw, barH, r)
+                    : ctx.rect(x + (barW - bw) / 2, y, bw, barH);
+      ctx.fill();
+    });
+  }, [peaks, current, duration, playing]);
+
+  const handleClick = (e) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !duration) return;
+    const rect = canvas.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    onSeek(Math.max(0, Math.min(1, ratio)) * duration);
+  };
+
+  // Fallback: original range input (also used before peaks decode).
+  if (!peaks) {
+    const progress = duration ? (current / duration) * 100 : 0;
+    return (
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="0.1"
+        value={progress}
+        onChange={(e) => onSeek((Number(e.target.value) / 100) * duration)}
+        className="seek mt-2 w-full"
+        style={{ "--seek": `${progress}%` }}
+        aria-label="Seek through the episode"
+      />
+    );
+  }
+
+  return (
+    <canvas
+      ref={canvasRef}
+      onClick={handleClick}
+      role="slider"
+      aria-label="Seek through the episode"
+      aria-valuemin={0}
+      aria-valuemax={Math.round(duration) || 0}
+      aria-valuenow={Math.round(current) || 0}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowRight") onSeek(current + 10);
+        if (e.key === "ArrowLeft") onSeek(current - 10);
+      }}
+      className="waveform mt-2 w-full cursor-pointer"
+      style={{ height: "44px" }}
+    />
+  );
+}
+
 function Player({ src, downloadName, engineLabel }) {
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -74,12 +199,10 @@ function Player({ src, downloadName, engineLabel }) {
     }
   };
 
-  const seek = (e) => {
+  const skip = (delta) => {
     const audio = audioRef.current;
-    if (!audio || !duration) return;
-    const t = (Number(e.target.value) / 100) * duration;
-    audio.currentTime = t;
-    setCurrent(t);
+    if (!audio) return;
+    audio.currentTime = Math.max(0, Math.min(duration || 0, audio.currentTime + delta));
   };
 
   const cycleRate = () => {
@@ -87,12 +210,6 @@ function Player({ src, downloadName, engineLabel }) {
     const next = rates[(rates.indexOf(rate) + 1) % rates.length];
     setRate(next);
     if (audioRef.current) audioRef.current.playbackRate = next;
-  };
-
-  const skip = (delta) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = Math.max(0, Math.min(duration || 0, audio.currentTime + delta));
   };
 
   const handleDownload = () => {
@@ -103,8 +220,6 @@ function Player({ src, downloadName, engineLabel }) {
     link.click();
     document.body.removeChild(link);
   };
-
-  const progress = duration ? (current / duration) * 100 : 0;
 
   return (
     <div className="glass-deep rounded-2xl p-5">
@@ -138,16 +253,17 @@ function Player({ src, downloadName, engineLabel }) {
               {formatTime(current)} / {formatTime(duration)}
             </span>
           </div>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="0.1"
-            value={progress}
-            onChange={seek}
-            className="seek mt-2 w-full"
-            style={{ "--seek": `${progress}%` }}
-            aria-label="Seek through the episode"
+          <WaveformSeek
+            audioSrc={src}
+            duration={duration}
+            current={current}
+            playing={playing}
+            onSeek={(t) => {
+              const audio = audioRef.current;
+              if (!audio) return;
+              audio.currentTime = Math.max(0, Math.min(duration || 0, t));
+              setCurrent(audio.currentTime);
+            }}
           />
         </div>
       </div>
@@ -201,8 +317,7 @@ function CountPill({ label, count, tint }) {
   );
 }
 
-function IntelligencePanel({ analysis }) {
-  const [open, setOpen] = useState("tables");
+function IntelligencePanel({ analysis, openSection, onSectionChange }) {
   if (!analysis) return null;
 
   const sections = [
@@ -343,10 +458,10 @@ function IntelligencePanel({ analysis }) {
               <button
                 key={s.id}
                 role="tab"
-                aria-selected={open === s.id}
-                onClick={() => setOpen(open === s.id ? "" : s.id)}
+                aria-selected={openSection === s.id}
+                onClick={() => onSectionChange(openSection === s.id ? "" : s.id)}
                 className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all duration-200 border
-                  ${open === s.id
+                  ${openSection === s.id
                     ? "bg-aurora-violet/25 text-white border-aurora-violet/60"
                     : "bg-white/[0.03] text-dim border-white/10 hover:text-ink hover:border-white/25"}`}
               >
@@ -354,9 +469,9 @@ function IntelligencePanel({ analysis }) {
               </button>
             ))}
           </div>
-          {sections.map(
+          {openSection && sections.map(
             (s) =>
-              open === s.id && (
+              openSection === s.id && (
                 <div key={s.id} role="tabpanel" className="panel-scroll mt-4 max-h-96 overflow-y-auto pr-1 animate-fade-in">
                   {s.render()}
                 </div>
@@ -424,6 +539,7 @@ export default function ResultSection({ result, fileName }) {
   } = result;
 
   const [copied, setCopied] = useState(false);
+  const [openSection, setOpenSection] = useState("");
 
   const audioSrc = useMemo(() => {
     if (!audioBase64) return null;
@@ -454,6 +570,18 @@ export default function ResultSection({ result, fileName }) {
     } catch {
       /* clipboard unavailable */
     }
+  };
+
+  const handleDownloadTranscript = () => {
+    const blob = new Blob([script], { type: 'text/plain' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(fileName || result.filename || 'document').replace(/\.(pdf|pptx|md|markdown|txt)$/i, '')}-transcript.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
   };
 
   return (
@@ -511,15 +639,77 @@ export default function ResultSection({ result, fileName }) {
                 <span className="rounded-full border border-aurora-cyan/40 bg-aurora-cyan/15 px-2.5 py-0.5 font-semibold text-cyan-200">Rhys</span>
               </span>
             )}
-            <button
-              type="button"
-              onClick={copyTranscript}
-              className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-aurora-cyan/50"
-            >
-              {copied ? "✓ Copied" : "Copy"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={copyTranscript}
+                className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-aurora-cyan/50"
+              >
+                {copied ? "✓ Copied" : "Copy"}
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadTranscript}
+                className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-aurora-cyan/50"
+              >
+                📄 Download
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Intelligence Preview Bar */}
+        {analysis && (
+          <div className="flex items-center gap-4 px-4 mb-2 bg-white/[0.02] rounded-xl cursor-pointer hover:bg-white/[0.03] transition-colors"
+             onClick={() => {
+               // Determine first available section to open
+               let firstSection = "";
+               if (analysis.tables?.length > 0) firstSection = "tables";
+               else if ((analysis.charts?.length || 0) + (analysis.figures?.length || 0) > 0) firstSection = "charts";
+               else if (analysis.images?.length > 0) firstSection = "images";
+               else if (analysis.handwritten_notes?.length > 0) firstSection = "handwriting";
+               else if (analysis.speaker_notes?.length > 0) firstSection = "notes";
+               
+               // Toggle: if closed, open first section; if open, close
+               setOpenSection(openSection === "" ? firstSection : "");
+             }}
+             title="Click to view extracted content"
+          >
+            <span className="text-xs font-semibold text-dim">Extracted:</span>
+            <span className="flex items-center gap-2">
+              {analysis.tables?.length > 0 && (
+                <>
+                  <span className="text-aurora-cyan">📊 {analysis.tables.length}</span>
+                  <span className="text-[10px] text-dim">tables</span>
+                </>
+              )}
+              {(analysis.charts?.length || 0) + (analysis.figures?.length || 0) > 0 && (
+                <>
+                  <span className="text-aurora-teal">📈 {((analysis.charts?.length || 0) + (analysis.figures?.length || 0))}</span>
+                  <span className="text-[10px] text-dim">charts</span>
+                </>
+              )}
+              {analysis.images?.length > 0 && (
+                <>
+                  <span className="text-aurora-magenta">🖼️ {analysis.images.length}</span>
+                  <span className="text-[10px] text-dim">images</span>
+                </>
+              )}
+              {analysis.handwritten_notes?.length > 0 && (
+                <>
+                  <span className="text-amber-200">✎ {analysis.handwritten_notes.length}</span>
+                  <span className="text-[10px] text-dim">handwritten</span>
+                </>
+              )}
+              {analysis.speaker_notes?.length > 0 && (
+                <>
+                  <span className="text-faint">📝 {analysis.speaker_notes.length}</span>
+                  <span className="text-[10px] text-dim">notes</span>
+                </>
+              )}
+            </span>
+          </div>
+        )}
 
         <div className="script-scroll mt-4 max-h-96 overflow-y-auto pr-2">
           {isDialogue ? (
@@ -548,7 +738,13 @@ export default function ResultSection({ result, fileName }) {
       </section>
 
       {/* Intelligence */}
-      <IntelligencePanel analysis={analysis} />
+      {openSection && (
+        <IntelligencePanel 
+          analysis={analysis} 
+          openSection={openSection} 
+          onSectionChange={setOpenSection} 
+        />
+      )}
     </div>
   );
 }

@@ -1,1 +1,10 @@
 voices/*.onnx*
+
+# Local database (contains password hashes and session tokens)
+backend/docucast.db
+*.db
+
+# Secrets
+.env
+backend/.env
+frontend/.env
