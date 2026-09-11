@@ -25,6 +25,7 @@ If no keys set, automatically uses local fallback (extractive summarization).
 If Gemini hits 429/quota, automatically falls back to next available provider.
 """
 
+import json
 import os
 import re
 from collections import Counter
@@ -111,6 +112,158 @@ Rules for Professional Podcasting:
 # The user prompt template
 def _build_user_prompt(text: str) -> str:
     return f"Document brief:\n{text}\n\nGenerate the podcast script now."
+
+
+# ---------------------------------------------------------------------------
+# Show notes + chapters (podcast-ready metadata generated from the script)
+# ---------------------------------------------------------------------------
+SHOW_NOTES_SYSTEM = """You are a podcast producer writing show notes for an episode.
+Given the podcast script, reply ONLY with compact JSON (no markdown fences) shaped as:
+{"title": "a punchy episode title under 60 chars",
+ "description": "a one-sentence episode description",
+ "takeaways": ["3-5 key takeaways, each one short sentence"],
+ "chapters": [{"title": "chapter title", "summary": "one-line summary"}]}
+Rules:
+- Derive everything strictly from the script; never invent facts.
+- 3-6 chapters, ordered to follow the episode's arc.
+- Titles are spoken-word friendly (no jargon without plain meaning)."""
+
+
+def _parse_show_notes(raw: str) -> dict | None:
+    """Extract the JSON object from an LLM reply; tolerate fences/prose."""
+    if not raw:
+        return None
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None
+    takeaways = data.get("takeaways")
+    chapters = data.get("chapters")
+    return {
+        "title": (data.get("title") or "")[:120] or None,
+        "description": (data.get("description") or "")[:300] or None,
+        "takeaways": [str(t)[:240] for t in takeaways[:6]] if isinstance(takeaways, list) else [],
+        "chapters": [
+            {
+                "title": str(c.get("title", ""))[:120],
+                "summary": str(c.get("summary", ""))[:240],
+            }
+            for c in (chapters or [])[:8]
+            if isinstance(c, dict) and c.get("title")
+        ],
+    }
+
+
+def generate_show_notes(script: str, options: dict | None = None) -> dict | None:
+    """Best-effort show notes via the same provider fallback chain.
+
+    Returns {"title","description","takeaways","chapters"} or None (never raises —
+    show notes are a bonus, not a blocker).
+    """
+    if not script or not script.strip():
+        return None
+    order = _get_provider_order()
+    # Notes are cheap — use a small budget and skip ollama/local (local is a
+    # template summarizer that can't produce this JSON).
+    for provider in order:
+        if provider in ("local", "ollama"):
+            continue
+        try:
+            if provider == "gemini" and not (os.getenv("GEMINI_API_KEY") or _EXPLICIT_GEMINI_KEY):
+                continue
+            if provider == "groq" and not os.getenv("GROQ_API_KEY"):
+                continue
+            if provider == "openrouter" and not os.getenv("OPENROUTER_API_KEY"):
+                continue
+            if provider == "cerebras" and not os.getenv("CEREBRAS_API_KEY"):
+                continue
+            if provider == "huggingface" and not (os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")):
+                continue
+            raw = _dispatch_provider(
+                provider, script[:12000], SHOW_NOTES_SYSTEM, 700, options or {}
+            )
+            notes = _parse_show_notes(raw)
+            if notes and (notes.get("title") or notes.get("takeaways") or notes.get("chapters")):
+                return notes
+        except Exception:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Chat with the document (grounded Q&A over the enriched source brief)
+# ---------------------------------------------------------------------------
+CHAT_SYSTEM = """You are DocuCast's document assistant. You answer questions strictly
+from the document brief provided. Rules:
+- Ground every claim in the brief; if it isn't there, say plainly what the brief
+  does and doesn't cover instead of guessing.
+- Cite what you use: when an answer relies on a table, chart, figure or
+  handwritten note from the brief, mention it naturally (e.g. "per the table on
+  page 3", "the chart the hosts discussed").
+- Be concise: 2-5 short sentences, spoken-friendly language.
+- Answer in plain text, no markdown formatting."""
+
+
+def answer_question(source_text: str, question: str, history: list | None = None) -> str:
+    """Answer one question grounded in the enriched source text.
+
+    Uses the provider fallback chain (local template summarizer is skipped —
+    it can't do grounded Q&A). Raises ValueError when no provider can answer.
+    """
+    if not source_text or not source_text.strip():
+        raise ValueError("This episode has no stored source text.")
+    if not question or not question.strip():
+        raise ValueError("Ask a question first.")
+
+    # Keep the brief bounded but generous; chat answers stay short.
+    brief = source_text[:18000]
+
+    conversation = ""
+    # A little prior Q&A gives follow-up questions their context.
+    for turn in (history or [])[-6:]:
+        role = "User" if turn.get("role") == "user" else "You"
+        content = (turn.get("content") or "")[:1200]
+        if content:
+            conversation += f"{role}: {content}\n"
+    if conversation:
+        conversation += "\n"
+
+    prompt = (
+        f"{conversation}"
+        f"Document brief:\n{brief}\n\n"
+        f"User question: {question.strip()}\n"
+        f"Answer now, grounded strictly in the brief."
+    )
+
+    order = _get_provider_order()
+    errors = {}
+    for provider in order:
+        if provider in ("local", "ollama"):
+            continue  # template summarizer can't answer grounded questions
+        if provider == "gemini" and not (os.getenv("GEMINI_API_KEY") or _EXPLICIT_GEMINI_KEY):
+            continue
+        if provider == "groq" and not os.getenv("GROQ_API_KEY"):
+            continue
+        if provider == "openrouter" and not os.getenv("OPENROUTER_API_KEY"):
+            continue
+        if provider == "cerebras" and not os.getenv("CEREBRAS_API_KEY"):
+            continue
+        if provider == "huggingface" and not (os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY")):
+            continue
+        try:
+            answer = _dispatch_provider(provider, prompt, CHAT_SYSTEM, 500, {})
+            if answer and answer.strip():
+                return answer.strip()
+        except Exception as exc:
+            errors[provider] = str(exc)
+            continue
+    raise ValueError(
+        "No AI provider could answer (all offline/limited right now). "
+        f"Provider errors: {errors or 'no keys configured'}"
+    )
 
 
 # Map length preset -> max_output_tokens so deep dives aren't truncated.

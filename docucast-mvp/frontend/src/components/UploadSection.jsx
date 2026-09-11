@@ -1,11 +1,13 @@
 import { useCallback, useRef, useState } from "react";
 
-const ACCEPTED_EXTENSIONS = [".pdf", ".pptx", ".md", ".markdown", ".txt"];
+const ACCEPTED_EXTENSIONS = [".pdf", ".pptx", ".docx", ".md", ".markdown", ".txt"];
 const MAX_SIZE_MB = 20;
+const MAX_FILES = 5;
 
 const FILE_META = {
   pdf: { label: "PDF", tint: "text-aurora-magenta", glyph: "◰" },
   pptx: { label: "Slides", tint: "text-aurora-cyan", glyph: "▤" },
+  docx: { label: "Word", tint: "text-aurora-indigo", glyph: "▤" },
   md: { label: "Markdown", tint: "text-aurora-teal", glyph: "◇" },
   markdown: { label: "Markdown", tint: "text-aurora-teal", glyph: "◇" },
   txt: { label: "Text", tint: "text-aurora-violet", glyph: "≡" },
@@ -65,8 +67,8 @@ function extOf(name = "") {
 }
 
 export default function UploadSection({
-  file,
-  setFile,
+  files,
+  setFiles,
   studio,
   setStudio,
   onGenerate,
@@ -81,46 +83,63 @@ export default function UploadSection({
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState("");
   const [showTuning, setShowTuning] = useState(false);
-  const [fileValid, setFileValid] = useState(false);
+  const [lastAccepted, setLastAccepted] = useState(null); // name of last accepted file, for the ✓ flash
 
   const acceptFile = useCallback(
     (candidate) => {
       setFileError("");
-      setFileValid(false);
       if (!candidate) {
-        setFile(null);
+        setFiles([]);
         return false;
       }
-      const ext = "." + extOf(candidate.name);
-      if (candidate.name.toLowerCase().endsWith(".ppt")) {
-        setFileError("Legacy .ppt isn't supported — re-save the deck as .pptx and try again.");
-        setFile(null);
-        return false;
+      // Multiple documents: validate each, replace the set with the new selection.
+      const incoming = Array.isArray(candidate) ? candidate : [candidate];
+      const accepted = [];
+      for (const c of incoming) {
+        const ext = "." + extOf(c.name);
+        if (c.name.toLowerCase().endsWith(".ppt")) {
+          setFileError(`${c.name}: legacy .ppt isn't supported — re-save the deck as .pptx and try again.`);
+          continue;
+        }
+        if (c.name.toLowerCase().endsWith(".doc")) {
+          setFileError(`${c.name}: legacy .doc isn't supported — re-save the document as .docx and try again.`);
+          continue;
+        }
+        if (!ACCEPTED_EXTENSIONS.includes(ext)) {
+          setFileError(`"${ext}" isn't supported yet. Use ${ACCEPTED_EXTENSIONS.join(", ")}.`);
+          continue;
+        }
+        if (c.size > MAX_SIZE_MB * 1024 * 1024) {
+          setFileError(`${c.name} is ${(c.size / (1024 * 1024)).toFixed(1)} MB — the limit is ${MAX_SIZE_MB} MB.`);
+          continue;
+        }
+        if (c.size === 0) {
+          setFileError(`${c.name} looks empty.`);
+          continue;
+        }
+        accepted.push(c);
       }
-      if (!ACCEPTED_EXTENSIONS.includes(ext)) {
-        setFileError(`"${ext}" isn't supported yet. Use ${ACCEPTED_EXTENSIONS.join(", ")}.`);
-        setFile(null);
-        return false;
+      const combined = accepted.slice(0, MAX_FILES);
+      if (accepted.length > MAX_FILES) {
+        setFileError(`At most ${MAX_FILES} documents per episode — keeping the first ${MAX_FILES}.`);
       }
-      if (candidate.size > MAX_SIZE_MB * 1024 * 1024) {
-        setFileError(`That file is ${(candidate.size / (1024 * 1024)).toFixed(1)} MB — the limit is ${MAX_SIZE_MB} MB.`);
-        setFile(null);
-        return false;
+      if (combined.length) {
+        setFiles(combined);
+        setLastAccepted(combined[combined.length - 1].name);
+        return true;
       }
-      if (candidate.size === 0) {
-        setFileError("That file looks empty.");
-        setFile(null);
-        return false;
-      }
-      setFile(candidate);
-      setFileValid(true);
-      return true;
+      if (!fileError) setFileError("No usable file was selected.");
+      return false;
     },
-    [setFile],
+    [setFiles, fileError],
   );
 
+  const removeFile = (name) => {
+    setFiles((current) => current.filter((f) => f.name !== name));
+  };
+
   const handleChange = (e) => {
-    acceptFile(e.target.files?.[0] || null);
+    acceptFile(e.target.files ? Array.from(e.target.files) : null);
     e.target.value = "";
   };
 
@@ -128,11 +147,11 @@ export default function UploadSection({
     e.preventDefault();
     setDragging(false);
     if (loading) return;
-    acceptFile(e.dataTransfer?.files?.[0] || null);
+    acceptFile(e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : null);
   };
 
-  const canGenerate = !!file && !loading && retryAfterSeconds === 0;
-  const meta = file ? FILE_META[extOf(file.name)] : null;
+  const canGenerate = files.length > 0 && !loading && retryAfterSeconds === 0;
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
   const elapsedLabel = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
 
   return (
@@ -141,7 +160,7 @@ export default function UploadSection({
       <div
         role="button"
         tabIndex={0}
-        aria-label={file ? `Selected file ${file.name}. Activate to choose another.` : "Choose or drop a document"}
+        aria-label={files.length ? `${files.length} document${files.length > 1 ? "s" : ""} selected. Activate to choose others.` : "Choose or drop up to 5 documents"}
         onClick={() => !loading && inputRef.current?.click()}
         onKeyDown={(e) => {
           if ((e.key === "Enter" || e.key === " ") && !loading) {
@@ -161,19 +180,54 @@ export default function UploadSection({
             : "border-white/15 hover:border-aurora-violet/50 hover:bg-white/[0.03]"}
           ${loading ? "opacity-50 pointer-events-none" : ""}`}
       >
-        {file ? (
+        {files.length ? (
           <>
-            <span className={`text-4xl ${meta?.tint || "text-aurora-violet"} ${fileValid ? "animate-pulse" : ""}`} aria-hidden="true">
-              {meta?.glyph || "◰"}
-              {fileValid && (
-                <span className="absolute -right-2 -top-2 w-3 h-3 bg-green-500 rounded-full border-2 border-white/20 animate-pulse" aria-hidden="true" />
-              )}
+            <span className="text-3xl text-aurora-violet animate-pulse-soft" aria-hidden="true">
+              {files.length === 1 ? (FILE_META[extOf(files[0].name)]?.glyph || "◰") : "◫"}
             </span>
-            <div>
-              <p className="font-display font-semibold text-ink break-all">{file.name}</p>
-              <p className="mt-1 text-xs text-dim">
-                {meta?.label || "Document"} · {(file.size / (1024 * 1024)).toFixed(2)} MB · click or drop to replace
+            <div className="w-full max-w-2xl">
+              <p className="font-display text-base font-semibold text-ink">
+                {files.length === 1
+                  ? files[0].name
+                  : `${files.length} sources — one episode`}
+                <span className="ml-2 text-xs font-normal text-dim">
+                  {(totalBytes / (1024 * 1024)).toFixed(2)} MB · click or drop to replace
+                </span>
               </p>
+              {/* Source chips: one per document, removable */}
+              <div className="mt-2.5 flex flex-wrap justify-center gap-2">
+                {files.map((f) => {
+                  const meta = FILE_META[extOf(f.name)];
+                  return (
+                    <span
+                      key={f.name + f.size}
+                      className={`source-chip group/chip ${lastAccepted === f.name ? "source-chip--new" : ""}`}
+                      title={`${(f.size / 1024).toFixed(0)} KB`}
+                    >
+                      <span className={`mr-1 ${meta?.tint || "text-aurora-violet"}`} aria-hidden="true">
+                        {meta?.glyph || "◰"}
+                      </span>
+                      <span className="max-w-[12rem] truncate">{f.name}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation(); // don't open the file picker
+                          removeFile(f.name);
+                        }}
+                        aria-label={`Remove ${f.name}`}
+                        className="ml-1.5 rounded-full px-1 text-dim opacity-60 transition-all hover:text-red-300 hover:opacity-100"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+              {files.length > 1 && (
+                <p className="mt-2 text-[11px] text-faint">
+                  The hosts will compare and connect all {files.length} documents in one episode.
+                </p>
+              )}
             </div>
           </>
         ) : (
@@ -186,10 +240,13 @@ export default function UploadSection({
             </span>
             <div>
               <p className="font-display text-lg font-semibold text-ink">
-                Drop a document, or <span className="text-aurora">browse</span>
+                Drop {MAX_FILES > 1 ? "documents" : "a document"}, or <span className="text-aurora">browse</span>
+                {MAX_FILES > 1 && (
+                  <span className="ml-2 text-xs font-normal text-dim">up to {MAX_FILES} — mixed & matched</span>
+                )}
               </p>
               <p className="mt-1.5 text-xs text-dim">
-                PDF · PPTX · Markdown · TXT — up to {MAX_SIZE_MB} MB
+                PDF · PPTX · DOCX · Markdown · TXT — up to {MAX_SIZE_MB} MB each
               </p>
             </div>
           </>
@@ -199,7 +256,8 @@ export default function UploadSection({
       <input
         ref={inputRef}
         type="file"
-        accept=".pdf,.pptx,.md,.markdown,.txt,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/markdown,text/plain"
+        multiple
+        accept=".pdf,.pptx,.docx,.md,.markdown,.txt,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain"
         onChange={handleChange}
         className="hidden"
         disabled={loading}
@@ -326,10 +384,10 @@ export default function UploadSection({
             </>
           )}
         </button>
-        {!loading && file && (
+        {!loading && files.length > 0 && (
           <button
             type="button"
-            onClick={() => setFile(null)}
+            onClick={() => setFiles([])}
             className="rounded-xl border border-white/10 bg-white/[0.03] px-5 py-4 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-white/25"
           >
             Clear

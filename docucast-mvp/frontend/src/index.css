@@ -294,6 +294,166 @@ input[type="range"].seek::-moz-range-thumb {
 }
 
 /* ------------------------------------------------------------------ */
+/* Dashboard                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Hover glow sweep — a diagonal light band that crosses the card */
+.dash-sheen {
+  position: absolute;
+  top: 0;
+  left: -80%;
+  width: 55%;
+  height: 100%;
+  background: linear-gradient(
+    115deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.06) 40%,
+    rgba(139, 92, 246, 0.16) 55%,
+    rgba(34, 211, 238, 0.1) 70%,
+    transparent 100%
+  );
+  transform: skewX(-18deg);
+  pointer-events: none;
+  transition: none;
+}
+
+.dash-card:hover .dash-sheen {
+  animation: sheen-sweep 0.9s ease-out;
+}
+
+@keyframes sheen-sweep {
+  from { left: -80%; }
+  to { left: 160%; }
+}
+
+/* Breathing status dot on stat cards */
+.stat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.9;
+  animation: pulse-soft 2.4s ease-in-out infinite;
+}
+
+/* Per-card accent tints (color + soft radial corner glow) */
+.stat-card--stat-violet { color: #a78bfa; }
+.stat-card--stat-cyan { color: #67e8f9; }
+.stat-card--stat-teal { color: #5eead4; }
+.stat-card--stat-magenta { color: #f9a8d4; }
+
+.stat-card::after {
+  content: "";
+  position: absolute;
+  bottom: -40%;
+  right: -20%;
+  width: 60%;
+  height: 80%;
+  border-radius: 9999px;
+  background: radial-gradient(circle, currentColor, transparent 70%);
+  opacity: 0.08;
+  pointer-events: none;
+  transition: opacity 0.35s ease;
+}
+
+.stat-card:hover::after {
+  opacity: 0.16;
+}
+
+/* Skeleton shimmer for loading rows */
+.dash-skeleton {
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0.03) 40%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.03) 60%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-slide {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* Gentle floating glyph (empty state) */
+.animate-float {
+  animation: float-y 3s ease-in-out infinite;
+}
+
+@keyframes float-y {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+/* Source chips — one per uploaded document in the multi-file dropzone */
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 16rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #e7e9f5;
+  transition: border-color 0.25s ease, transform 0.25s ease, box-shadow 0.25s ease;
+  animation: fade-in 0.35s ease-out;
+}
+
+.source-chip:hover {
+  border-color: rgba(139, 92, 246, 0.5);
+  transform: translateY(-1px);
+  box-shadow: 0 0 18px rgba(139, 92, 246, 0.15);
+}
+
+/* freshly added source gets a brief aurora highlight */
+.source-chip--new {
+  animation: chip-land 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes chip-land {
+  0% { transform: scale(0.6); opacity: 0; border-color: rgba(34, 211, 238, 0.8); }
+  60% { transform: scale(1.05); border-color: rgba(34, 211, 238, 0.6); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Engine-room status pills */
+.engine-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.2rem 0.65rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #9aa2c0;
+  letter-spacing: 0.02em;
+}
+
+.engine-pill--on {
+  border-color: rgba(45, 212, 191, 0.4);
+  background: rgba(45, 212, 191, 0.08);
+  color: #5eead4;
+}
+
+.engine-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.engine-pill--on .engine-dot {
+  animation: pulse-soft 2s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.7);
+}
+
+/* ------------------------------------------------------------------ */
 /* Accessibility                                                       */
 /* ------------------------------------------------------------------ */
 :focus-visible {

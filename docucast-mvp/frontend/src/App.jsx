@@ -3,6 +3,7 @@ import axios from "axios";
 import UploadSection from "./components/UploadSection.jsx";
 import ResultSection from "./components/ResultSection.jsx";
 import HistorySection from "./components/HistorySection.jsx";
+import DashboardSection from "./components/DashboardSection.jsx";
 import HalftoneFlow from "./components/HalftoneFlow.jsx";
 
 const API_URL = import.meta.env.VITE_API_URL || "/api";
@@ -25,17 +26,18 @@ function loadTheme() {
   return "dark"; // dark-first design; default stays dark
 }
 
-// Cycled loading messages. The backend runs synchronously in one request, so
-// these are a timed UI sequence, NOT real server progress.
-const LOADING_STAGES = [
-  "Reading the document…",
-  "Extracting tables, images & graphs…",
-  "Analyzing visual content…",
-  "Writing the two-host script…",
-  "Synthesizing voices…",
-];
-const STAGE_INTERVAL_MS = 4500;
-const REQUEST_TIMEOUT_MS = 240_000;
+// Server-driven job stages (the backend reports REAL progress via /jobs/{id}).
+const STAGE_LABELS = {
+  queued: "Queued…",
+  parsing: "Reading the document — text, tables, images…",
+  script: "Writing the script…",
+  "show notes": "Drafting show notes & chapters…",
+  synthesizing: "Synthesizing voices…",
+  saving: "Saving to your library…",
+  done: "Done",
+};
+const POLL_INTERVAL_MS = 1500;
+const JOB_TIMEOUT_MS = 300_000;
 
 export const DEFAULT_STUDIO = {
   mode: "dialogue",
@@ -157,16 +159,20 @@ export default function App() {
   const [authMode, setAuthMode] = useState("login");
   const [credentials, setCredentials] = useState({ username: "", password: "" });
   const [loginLoading, setLoginLoading] = useState(false);
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]); // multi-document sources (max 5)
   const [studio, setStudio] = useState(loadStudioPrefs);
   const [loading, setLoading] = useState(false);
+  const [jobStage, setJobStage] = useState("queued");
+  const [jobPercent, setJobPercent] = useState(0);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
-  const [stageIndex, setStageIndex] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [retryAfterSeconds, setRetryAfterSeconds] = useState(0);
+  const [regenerating, setRegenerating] = useState(false);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [dashboardStats, setDashboardStats] = useState(null);
+  const [activeView, setActiveView] = useState("dashboard"); // dashboard | studio
   const [theme, setTheme] = useState(loadTheme);
   const intervalRef = useRef(null);
   const elapsedRef = useRef(null);
@@ -176,7 +182,7 @@ export default function App() {
     localStorage.removeItem(TOKEN_KEY);
     setAuthToken("");
     setAuthUser(null);
-    setFile(null);
+    setFiles([]);
     setError("");
     setResult(null);
   }, []);
@@ -232,26 +238,13 @@ export default function App() {
     }
   }, [theme]);
 
-  // Cycle the loading-stage text while a request is in flight, and show a
-  // real elapsed timer (the backend gives no progress events — this is honest
-  // "how long has it been", not fake progress).
+  // Honest elapsed clock while a job runs (complements the real server stages).
   useEffect(() => {
     if (loading) {
-      setStageIndex(0);
       setElapsedSeconds(0);
-      intervalRef.current = setInterval(() => {
-        setStageIndex((i) => Math.min(i + 1, LOADING_STAGES.length - 1));
-      }, STAGE_INTERVAL_MS);
-      elapsedRef.current = setInterval(() => {
-        setElapsedSeconds((s) => s + 1);
-      }, 1000);
-      return () => {
-        clearInterval(intervalRef.current);
-        clearInterval(elapsedRef.current);
-      };
+      const t = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
+      return () => clearInterval(t);
     }
-    clearInterval(intervalRef.current);
-    clearInterval(elapsedRef.current);
     return undefined;
   }, [loading]);
 
@@ -300,14 +293,34 @@ export default function App() {
     return () => clearInterval(t);
   }, [retryAfterSeconds > 0]);
 
+  // Poll a backend job until done/error; updates real stage + percent.
+  const pollJob = useCallback(async (jobId) => {
+    const deadline = Date.now() + JOB_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const { data: job } = await axios.get(`${API_URL}/jobs/${jobId}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        timeout: 15_000,
+      });
+      setJobStage(job.stage || "queued");
+      setJobPercent(job.percent || 0);
+      if (job.status === "done") return { ok: true, result: job.result };
+      if (job.status === "error") return { ok: false, error: job.error || "Generation failed." };
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+    return { ok: false, error: "This is taking unusually long — please try again." };
+  }, [authToken]);
+
   const handleGenerate = useCallback(async () => {
-    if (!file || retryAfterSeconds > 0) return;
+    if (!files.length || retryAfterSeconds > 0) return;
     setLoading(true);
     setError("");
     setResult(null);
+    setJobStage("queued");
+    setJobPercent(0);
+    setActiveView("studio");
 
     const formData = new FormData();
-    formData.append("file", file);
+    files.forEach((f) => formData.append("files", f));
     formData.append("mode", studio.mode);
     formData.append("length", studio.length);
     formData.append("tone", studio.tone);
@@ -320,9 +333,11 @@ export default function App() {
           "Content-Type": "multipart/form-data",
           Authorization: `Bearer ${authToken}`,
         },
-        timeout: REQUEST_TIMEOUT_MS,
+        timeout: 30_000,
       });
-      setResult(data);
+      const outcome = await pollJob(data.job_id);
+      if (!outcome.ok) throw { response: { data: { detail: outcome.error } } };
+      setResult(outcome.result);
       setHistoryRefreshKey((k) => k + 1); // new episode saved — refresh history
     } catch (err) {
       const message =
@@ -343,7 +358,103 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [authToken, clearSession, file, studio]);
+  }, [authToken, clearSession, files, pollJob, retryAfterSeconds, studio]);
+
+  // Regenerate the CURRENT episode with the (possibly changed) studio settings.
+  const handleRegenerate = useCallback(async () => {
+    const episodeId = result?.episode_id;
+    if (!episodeId || regenerating) return;
+    setRegenerating(true);
+    setError("");
+    try {
+      const formData = new FormData();
+      formData.append("episode_id", episodeId);
+      formData.append("mode", studio.mode);
+      formData.append("length", studio.length);
+      formData.append("tone", studio.tone);
+      formData.append("audience", studio.audience);
+      formData.append("focus", studio.focus || "");
+      const { data } = await axios.post(`${API_URL}/regenerate`, formData, {
+        headers: { "Content-Type": "multipart/form-data", Authorization: `Bearer ${authToken}` },
+        timeout: 30_000,
+      });
+      const outcome = await pollJob(data.job_id);
+      if (!outcome.ok) throw { response: { data: { detail: outcome.error } } };
+      // Merge so analysis/filename stay from the original; script/audio are new.
+      setResult((prev) => ({ ...prev, ...outcome.result }));
+      setHistoryRefreshKey((k) => k + 1);
+    } catch (err) {
+      const message = err?.response?.data?.detail || err?.message || "Regeneration failed.";
+      if (err?.response?.status === 429) {
+        const match = message.match(/in (\d+) seconds?/i);
+        setRetryAfterSeconds(match ? parseInt(match[1], 10) : 60);
+      }
+      setError(message);
+    } finally {
+      setRegenerating(false);
+    }
+  }, [authToken, pollJob, regenerating, result, studio]);
+
+  // Re-synthesize audio from a user-edited script (no LLM, no re-parse).
+  const handleResynthesize = useCallback(async (editedScript) => {
+    if (!editedScript?.trim() || regenerating) return;
+    setRegenerating(true);
+    setError("");
+    try {
+      const { data } = await axios.post(`${API_URL}/resynthesize`, { script: editedScript }, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        timeout: 30_000,
+      });
+      const outcome = await pollJob(data.job_id);
+      if (!outcome.ok) throw { response: { data: { detail: outcome.error } } };
+      setResult((prev) => ({ ...prev, ...outcome.result }));
+    } catch (err) {
+      const message = err?.response?.data?.detail || err?.message || "Re-synthesis failed.";
+      setError(message);
+    } finally {
+      setRegenerating(false);
+    }
+  }, [authToken, pollJob, regenerating]);
+
+  // Open an episode from anywhere (dashboard, history) with its audio fetched.
+  const openEpisodeById = useCallback(async (episodeId) => {
+    try {
+      const { data } = await axios.get(`${API_URL}/episodes/${episodeId}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+        timeout: 30_000,
+      });
+      setResult({
+        script: data.script,
+        audio_base64: data.audio_base64,
+        audio_engine: data.audio_engine,
+        audio_mime: data.audio_mime,
+        provider: data.provider,
+        options: data.options,
+        analysis: data.analysis,
+        filename: data.filename,
+        episode_id: data.id,
+      });
+      setActiveView("studio");
+      if (resultRef.current) {
+        resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    } catch (err) {
+      setError(err?.response?.data?.detail || err?.message || "Could not open this episode.");
+    }
+  }, [authToken]);
+
+  // Dashboard CTA routing.
+  const handleDashboardActivate = useCallback((key) => {
+    if (key === "new") {
+      setActiveView("studio");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (key === "recent" || key === "tune") {
+      setActiveView("studio");
+      window.setTimeout(() => {
+        document.getElementById("episode-library")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 80);
+    }
+  }, []);
 
   /* ------------------------------------------------------------ */
   /* Session check splash                                          */
@@ -385,7 +496,7 @@ export default function App() {
             </p>
             <ul className="mt-8 grid gap-3 text-sm text-dim sm:grid-cols-2">
               {[
-                ["◈", "PDF, PPTX, MD & TXT"],
+                ["◈", "PDF, PPTX, DOCX, MD & TXT"],
                 ["◉", "Two-host dialogue audio"],
                 ["◫", "Tables & chart data narrated"],
                 ["✎", "Handwriting & image analysis"],
@@ -487,6 +598,28 @@ export default function App() {
                 <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-aurora-teal animate-pulse-soft align-middle" aria-hidden="true" />
                 {authUser?.username || "signed in"}
               </span>
+              {/* Dashboard / Studio view switch */}
+              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/25 p-1" role="tablist" aria-label="Main views">
+                {[
+                  { key: "dashboard", label: "Dashboard", glyph: "◫" },
+                  { key: "studio", label: "Studio", glyph: "◉" },
+                ].map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeView === tab.key}
+                    onClick={() => setActiveView(tab.key)}
+                    className={`rounded-full px-3.5 py-1 text-xs font-semibold transition-all duration-300
+                      ${activeView === tab.key
+                        ? "bg-aurora-violet/30 text-white shadow-glow border border-aurora-violet/50"
+                        : "text-dim hover:text-ink border border-transparent"}`}
+                  >
+                    <span className="mr-1" aria-hidden="true">{tab.glyph}</span>
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -531,11 +664,23 @@ export default function App() {
       </header>
 
       <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 pb-16 flex-1 flex flex-col">
+        {activeView === "dashboard" ? (
+          /* ---------------- Dashboard ---------------- */
+          <DashboardSection
+            authToken={authToken}
+            stats={dashboardStats}
+            refreshKey={historyRefreshKey}
+            onActivate={handleDashboardActivate}
+            onOpenEpisode={openEpisodeById}
+          />
+        ) : (
+          /* ---------------- Studio ---------------- */
+          <>
         {/* Hero */}
         <section className="pt-14 sm:pt-20 pb-10 sm:pb-14 text-center">
           <Reveal>
             <p className="text-[11px] font-semibold uppercase tracking-[0.4em] text-aurora-cyan">
-              PDF · PPTX · Markdown · Text
+              PDF · PPTX · DOCX · Markdown · Text
             </p>
           </Reveal>
           <Reveal delay={90}>
@@ -556,15 +701,15 @@ export default function App() {
         <main className="flex flex-col gap-8">
           <Reveal delay={80}>
             <UploadSection
-              file={file}
-              setFile={setFile}
+              files={files}
+              setFiles={setFiles}
               studio={studio}
               setStudio={setStudio}
               onGenerate={handleGenerate}
               loading={loading}
-              loadingMessage={LOADING_STAGES[stageIndex]}
-              stageIndex={stageIndex}
-              stageCount={LOADING_STAGES.length}
+              loadingMessage={STAGE_LABELS[jobStage] || STAGE_LABELS.queued}
+              stageIndex={jobPercent}
+              stageCount={100}
               elapsedSeconds={elapsedSeconds}
               retryAfterSeconds={retryAfterSeconds}
             />
@@ -592,16 +737,22 @@ export default function App() {
               <ResultSection
                 key={result.filename + (result.script?.length || 0)}
                 result={result}
-                fileName={file?.name}
+                fileName={files[0]?.name}
+                authToken={authToken}
+                onRegenerate={handleRegenerate}
+                onResynthesize={handleResynthesize}
+                regenerating={regenerating}
               />
             )}
           </div>
 
           {/* Saved episodes */}
-          <Reveal delay={80}>
+          <Reveal delay={80} id="episode-library-wrapper">
+            <div id="episode-library">
             <HistorySection
               authToken={authToken}
               refreshKey={historyRefreshKey}
+              onStats={setDashboardStats}
               onOpenEpisode={(episode) => {
                 setResult(episode);
                 if (resultRef.current) {
@@ -609,6 +760,7 @@ export default function App() {
                 }
               }}
             />
+            </div>
           </Reveal>
 
           {/* Why DocuCast strip */}
@@ -669,6 +821,8 @@ export default function App() {
             check the extraction panel to see exactly what was read.
           </p>
         </footer>
+          </>
+        )}
       </div>
     </div>
   );

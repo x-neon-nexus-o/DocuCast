@@ -19,3 +19,4 @@ pytesseract
 espeakng-loader
 # Optional: neural offline voices — drop .onnx models into backend/voices/
 piper-tts
+python-docx

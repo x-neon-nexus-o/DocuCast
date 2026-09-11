@@ -43,7 +43,7 @@ MAX_TABLE_CELL_CHARS = 120
 PAGES_LIMIT_NOTICE = "[First 25 pages processed]"
 TRUNCATION_NOTICE = "[Content truncated to fit processing budget]"
 
-SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".md", ".markdown", ".txt", ".text"}
+SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".docx", ".md", ".markdown", ".txt", ".text"}
 
 FIGURE_CAPTION_RE = re.compile(
     r"(?:^|\n)\s*((?:Figure|Fig\.?|Chart|Graph|Diagram|Plot|Exhibit)\s*\.?\s*\d+[.:)\-]?\s*[^\n]{0,220})",
@@ -173,10 +173,17 @@ def parse_document(file_bytes: bytes, filename: str) -> ParsedDocument:
         return _parse_pdf(file_bytes)
     if ext == ".pptx":
         return _parse_pptx(file_bytes)
+    if ext == ".docx":
+        return _parse_docx(file_bytes)
     if ext == ".ppt":
         raise ValueError(
             "Legacy .ppt files aren't supported — please re-save the deck as .pptx "
             "(PowerPoint: File → Save As → .pptx) and upload again."
+        )
+    if ext == ".doc":
+        raise ValueError(
+            "Legacy .doc files aren't supported — please re-save the document as .docx "
+            "(Word: File → Save As → .docx) and upload again."
         )
     if ext in {".md", ".markdown"}:
         return _parse_markdown(file_bytes)
@@ -184,7 +191,7 @@ def parse_document(file_bytes: bytes, filename: str) -> ParsedDocument:
         return _parse_text(file_bytes)
 
     raise ValueError(
-        "Unsupported file type. Upload a .pdf, .pptx, .md or .txt file."
+        "Unsupported file type. Upload a .pdf, .pptx, .docx, .md or .txt file."
     )
 
 
@@ -525,6 +532,94 @@ def _trend_insight(series_bits: list) -> str:
     except Exception:
         pass
     return ""
+
+
+# ---------------------------------------------------------------------------
+# DOCX (Word)
+# ---------------------------------------------------------------------------
+def _parse_docx(file_bytes: bytes) -> ParsedDocument:
+    try:
+        import docx  # python-docx
+    except ImportError as exc:
+        raise ValueError("DOCX support requires python-docx on the server.") from exc
+
+    doc = ParsedDocument(doc_type="docx")
+    try:
+        d = docx.Document(BytesIO(file_bytes))
+    except Exception as exc:
+        raise ValueError(
+            "Unable to read this Word document. It may be corrupted or a legacy .doc file."
+        ) from exc
+
+    chunks: list[str] = []
+    body = d.element.body
+    image_budget = MAX_IMAGES
+
+    # Walk the body in order so headings/paragraphs/tables keep document order.
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in body.iterchildren():
+        tag = child.tag.split("}")[-1]
+
+        if tag == "p":
+            para = Paragraph(child, d)
+            try:
+                style = (para.style.name or "").lower()
+            except Exception:
+                style = ""
+            text = para.text.strip()
+            if not text:
+                continue
+            if style.startswith("heading"):
+                try:
+                    level = int(style.replace("heading", "").strip() or "1")
+                except ValueError:
+                    level = 1
+                chunks.append("#" * min(level, 4) + " " + text)
+            else:
+                chunks.append(text)
+
+        elif tag == "tbl":
+            table = Table(child, d)
+            if len(doc.tables) < MAX_TABLES:
+                raw = [[cell.text for cell in row.cells] for row in table.rows]
+                t = _table_to_struct(raw, page=1)
+                if t:
+                    doc.tables.append(t)
+
+    # Embedded images (inline shapes reference image parts)
+    try:
+        for rel_id, rel in d.part.rels.items():
+            if image_budget <= 0:
+                break
+            if not rel.reltype.endswith("/image"):
+                continue
+            try:
+                entry = _analyze_image(rel.target_part.blob, page=1, page_text="")
+            except Exception:
+                entry = None
+            if entry:
+                doc.images.append(entry)
+                image_budget -= 1
+    except Exception:
+        pass
+
+    text = clean_text("\n\n".join(chunks))
+    doc.figures = _extract_figure_captions([text])
+    doc.text = _truncate(text)
+
+    doc.stats = {
+        "pages": 1,
+        "words": len(doc.text.split()),
+        "tables": len(doc.tables),
+        "images": len(doc.images),
+        "figures": len(doc.figures),
+    }
+
+    if not doc.text.strip() and not doc.tables and not doc.images:
+        raise ValueError("This Word document appears to be empty — no text, tables or images found.")
+    return doc
 
 
 # ---------------------------------------------------------------------------

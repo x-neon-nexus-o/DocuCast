@@ -65,12 +65,33 @@ def initialize_database() -> None:
                 script TEXT NOT NULL,
                 audio_base64 TEXT,
                 analysis_json TEXT,
+                source_text TEXT,
+                show_notes_json TEXT,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes(user_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                episode_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_episode ON chat_messages(episode_id, created_at);
             """
         )
+        # Lightweight migration: CREATE IF NOT EXISTS won't add columns to an
+        # existing episodes table, so add newer columns separately when missing.
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(episodes)")}
+        if "source_text" not in columns:
+            connection.execute("ALTER TABLE episodes ADD COLUMN source_text TEXT")
+        if "show_notes_json" not in columns:
+            connection.execute("ALTER TABLE episodes ADD COLUMN show_notes_json TEXT")
 
 
 def _password_hash(password: str, salt: bytes) -> str:
@@ -122,6 +143,26 @@ def authenticate_user(username: str, password: str) -> bool:
     if row is None:
         return False
     return verify_password(password, row["password_hash"])
+
+
+def reset_password(username: str, new_password: str) -> None:
+    """Admin escape hatch: set a user's password directly.
+
+    Intended for `DOCUCAST_RESET_USER`/`DOCUCAST_RESET_PASSWORD` at startup so
+    a forgotten password never permanently locks an account (and its episodes).
+    """
+    username = _normalize_username(username)
+    if not username:
+        raise ValueError("Username is required.")
+    if len(new_password) < 6:
+        raise ValueError("Password must be at least 6 characters long.")
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (hash_password(new_password), username),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError("Unknown user.")
 
 
 def _token_hash(token: str) -> str:
@@ -222,7 +263,8 @@ def save_episode(username: str, episode: dict) -> int:
     """Persist one generated episode, returning its id.
 
     `episode` keys: filename, doc_type, mode, length, tone, audience, focus,
-    provider, audio_engine, audio_mime, script, audio_base64, analysis_json.
+    provider, audio_engine, audio_mime, script, audio_base64, analysis_json,
+    source_text (enriched parse kept for regeneration), show_notes_json.
     """
     with get_connection() as connection:
         user_id = _resolve_user_id(connection, username)
@@ -231,8 +273,8 @@ def save_episode(username: str, episode: dict) -> int:
             INSERT INTO episodes (
                 user_id, filename, doc_type, mode, length, tone, audience, focus,
                 provider, audio_engine, audio_mime, script, audio_base64,
-                analysis_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                analysis_json, source_text, show_notes_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -249,14 +291,17 @@ def save_episode(username: str, episode: dict) -> int:
                 episode.get("script", ""),
                 episode.get("audio_base64"),
                 episode.get("analysis_json"),
+                episode.get("source_text"),
+                episode.get("show_notes_json"),
                 int(time.time()),
             ),
         )
         return cursor.lastrowid
 
 
-def list_episodes(username: str, limit: int = 50) -> list:
-    """Return the user's episodes, newest first, WITHOUT audio blobs."""
+def list_episodes(username: str, limit: int = 50) -> dict:
+    """Return {episodes, stats} for the user — episodes newest first WITHOUT
+    audio blobs, stats for the dashboard (totals across ALL episodes)."""
     with get_connection() as connection:
         user_id = _resolve_user_id(connection, username)
         rows = connection.execute(
@@ -268,6 +313,23 @@ def list_episodes(username: str, limit: int = 50) -> list:
             LIMIT ?
             """,
             (user_id, limit),
+        ).fetchall()
+        stats_row = connection.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_7d,
+                   MAX(created_at) AS latest,
+                   SUM(CASE WHEN audio_base64 IS NOT NULL AND audio_base64 != '' THEN 1 ELSE 0 END) AS with_audio
+            FROM episodes WHERE user_id = ?
+            """,
+            (int(time.time()) - 7 * 86400, user_id),
+        ).fetchone()
+        type_rows = connection.execute(
+            """
+            SELECT doc_type, COUNT(*) AS n FROM episodes
+            WHERE user_id = ? AND doc_type != '' GROUP BY doc_type ORDER BY n DESC
+            """,
+            (user_id,),
         ).fetchall()
     episodes = []
     for r in rows:
@@ -289,7 +351,14 @@ def list_episodes(username: str, limit: int = 50) -> list:
             "analysis": json.loads(r["analysis_json"]) if r["analysis_json"] else None,
             "created_at": r["created_at"],
         })
-    return episodes
+    stats = {
+        "total": stats_row["total"] or 0,
+        "last_7d": stats_row["last_7d"] or 0,
+        "with_audio": stats_row["with_audio"] or 0,
+        "latest_at": stats_row["latest"],
+        "doc_types": {row["doc_type"]: row["n"] for row in type_rows},
+    }
+    return {"episodes": episodes, "stats": stats}
 
 
 def get_episode(username: str, episode_id: int) -> Optional[dict]:
@@ -319,6 +388,7 @@ def get_episode(username: str, episode_id: int) -> Optional[dict]:
         "script": row["script"],
         "audio_base64": row["audio_base64"],
         "analysis": json.loads(row["analysis_json"]) if row["analysis_json"] else None,
+        "show_notes": json.loads(row["show_notes_json"]) if row.get("show_notes_json") else None,
         "created_at": row["created_at"],
     }
 
@@ -332,4 +402,90 @@ def delete_episode(username: str, episode_id: int) -> bool:
             (episode_id, user_id),
         )
         return cursor.rowcount > 0
+
+
+def update_episode_script(username: str, episode_id: int, script: str,
+                          audio_base64: str, audio_engine: str, audio_mime: str) -> None:
+    """Overwrite an episode's script + audio (used by regenerate / re-synthesize)."""
+    with get_connection() as connection:
+        user_id = _resolve_user_id(connection, username)
+        connection.execute(
+            """
+            UPDATE episodes
+            SET script = ?, audio_base64 = ?, audio_engine = ?, audio_mime = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (script, audio_base64, audio_engine, audio_mime, episode_id, user_id),
+        )
+
+
+def get_episode_source(username: str, episode_id: int) -> Optional[str]:
+    """Return the stored enriched source text for regeneration (None if missing)."""
+    with get_connection() as connection:
+        user_id = _resolve_user_id(connection, username)
+        row = connection.execute(
+            "SELECT source_text FROM episodes WHERE id = ? AND user_id = ?",
+            (episode_id, user_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return row["source_text"]
+
+
+# ---------------------------------------------------------------------------
+# Chat (Q&A grounded in an episode's source text)
+# ---------------------------------------------------------------------------
+def add_chat_message(username: str, episode_id: int, role: str, content: str) -> int:
+    """Append one chat turn for the user's episode, returning its id."""
+    with get_connection() as connection:
+        user_id = _resolve_user_id(connection, username)
+        # Ownership check via the episodes FK (raises if the row isn't theirs).
+        owns = connection.execute(
+            "SELECT 1 FROM episodes WHERE id = ? AND user_id = ?",
+            (episode_id, user_id),
+        ).fetchone()
+        if owns is None:
+            raise ValueError("Episode not found.")
+        cursor = connection.execute(
+            """
+            INSERT INTO chat_messages (user_id, episode_id, role, content, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, episode_id, role, content, int(time.time())),
+        )
+        return cursor.lastrowid
+
+
+def list_chat_messages(username: str, episode_id: int, limit: int = 100) -> list:
+    """Return the chat history for one of the user's episodes, oldest first."""
+    with get_connection() as connection:
+        user_id = _resolve_user_id(connection, username)
+        rows = connection.execute(
+            """
+            SELECT c.role, c.content, c.created_at
+            FROM chat_messages c
+            JOIN episodes e ON e.id = c.episode_id
+            WHERE c.episode_id = ? AND e.user_id = ?
+            ORDER BY c.id ASC LIMIT ?
+            """,
+            (episode_id, user_id, limit),
+        ).fetchall()
+    return [
+        {"role": r["role"], "content": r["content"], "created_at": r["created_at"]}
+        for r in rows
+    ]
+
+
+def clear_chat_messages(username: str, episode_id: int) -> int:
+    """Delete the chat history for one of the user's episodes. Returns rows removed."""
+    with get_connection() as connection:
+        user_id = _resolve_user_id(connection, username)
+        cursor = connection.execute(
+            """
+            DELETE FROM chat_messages
+            WHERE episode_id = ? AND user_id = ?
+            """,
+            (episode_id, user_id),
+        )
+        return cursor.rowcount
 

@@ -16,8 +16,9 @@ function timeAgo(unixSeconds) {
  * Episode history: fetches the user's saved generations from /episodes and
  * lets them reopen one (fetching audio lazily from /episodes/:id) or delete it.
  */
-export default function HistorySection({ authToken, onOpenEpisode, refreshKey }) {
+export default function HistorySection({ authToken, onOpenEpisode, refreshKey, onStats }) {
   const [episodes, setEpisodes] = useState(null); // null = loading
+  const [stats, setStats] = useState(null);
   const [error, setError] = useState("");
   const [openingId, setOpeningId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -32,7 +33,10 @@ export default function HistorySection({ authToken, onOpenEpisode, refreshKey })
         timeout: 15_000,
       })
       .then(({ data }) => {
-        if (isActive) setEpisodes(data.episodes || []);
+        if (!isActive) return;
+        setEpisodes(data.episodes || []);
+        setStats(data.stats || null);
+        if (onStats) onStats(data.stats || null);
       })
       .catch((err) => {
         if (!isActive) return;
@@ -42,7 +46,7 @@ export default function HistorySection({ authToken, onOpenEpisode, refreshKey })
     return () => {
       isActive = false;
     };
-  }, [authToken, refreshKey]);
+  }, [authToken, refreshKey, onStats]);
 
   const openEpisode = async (id) => {
     setOpeningId(id);
@@ -77,6 +81,14 @@ export default function HistorySection({ authToken, onOpenEpisode, refreshKey })
         timeout: 15_000,
       });
       setEpisodes((eps) => (eps || []).filter((e) => e.id !== id));
+      if (onStats && stats) {
+        // Keep dashboard totals in sync after an inline delete.
+        onStats({
+          ...stats,
+          total: Math.max(0, (stats.total || 0) - 1),
+          with_audio: Math.max(0, (stats.with_audio || 0) - 1),
+        });
+      }
     } catch (err) {
       setError(err?.response?.data?.detail || err?.message || "Could not delete this episode.");
     } finally {
@@ -111,7 +123,7 @@ export default function HistorySection({ authToken, onOpenEpisode, refreshKey })
           Your <span className="text-aurora">episodes</span>
         </h3>
         <span className="rounded-full border border-white/15 px-3 py-1 text-[11px] font-semibold text-dim">
-          {episodes.length} saved
+          {episodes.length} shown{stats && stats.total > episodes.length ? ` · ${stats.total} total` : ""}
         </span>
       </div>
 

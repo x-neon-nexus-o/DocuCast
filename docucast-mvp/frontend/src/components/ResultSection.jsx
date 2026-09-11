@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ChatPanel from "./ChatPanel.jsx";
 
 const SPEAKER_STYLES = {
   NOVA: { chip: "bg-aurora-violet/20 text-violet-200 border-aurora-violet/40", name: "Nova" },
@@ -523,9 +524,69 @@ function MarkdownTable({ markdown }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Show notes + chapters (podcast-ready metadata)                      */
+/* ------------------------------------------------------------------ */
+function ShowNotesCard({ notes, onCopy, copied }) {
+  const hasChapters = notes.chapters?.length > 0;
+  return (
+    <section aria-label="Show notes" className="glass rounded-[1.75rem] p-5 sm:p-7">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-aurora-cyan">Show notes</p>
+          {notes.title && <h3 className="mt-2 font-display text-2xl font-bold leading-tight">{notes.title}</h3>}
+          {notes.description && <p className="mt-1.5 max-w-2xl text-sm text-dim leading-relaxed">{notes.description}</p>}
+        </div>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-aurora-violet/50"
+        >
+          {copied ? "✓ Copied" : "Copy as markdown"}
+        </button>
+      </div>
+
+      {notes.takeaways?.length > 0 && (
+        <div className="mt-5">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-faint">Key takeaways</p>
+          <ul className="mt-2.5 grid gap-2">
+            {notes.takeaways.map((t, i) => (
+              <li key={i} className="flex items-start gap-2.5 text-sm text-ink/90 leading-relaxed">
+                <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full border border-aurora-violet/40 bg-aurora-violet/10 text-[10px] font-bold text-violet-200" aria-hidden="true">
+                  {i + 1}
+                </span>
+                {t}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {hasChapters && (
+        <div className="mt-6">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-faint">Chapters</p>
+          <ol className="mt-2.5 grid gap-2">
+            {notes.chapters.map((c, i) => (
+              <li key={i} className="flex items-start gap-3 rounded-xl border border-white/10 bg-black/25 px-4 py-3 transition-colors hover:border-aurora-violet/40">
+                <span className="tabular-nums text-xs font-bold text-aurora-cyan pt-0.5" aria-hidden="true">
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <div>
+                  <p className="text-sm font-semibold text-ink">{c.title}</p>
+                  {c.summary && <p className="mt-0.5 text-xs text-dim leading-relaxed">{c.summary}</p>}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Result section                                                      */
 /* ------------------------------------------------------------------ */
-export default function ResultSection({ result, fileName }) {
+export default function ResultSection({ result, fileName, onRegenerate, onResynthesize, regenerating, authToken }) {
   const {
     script,
     audio_base64: audioBase64,
@@ -536,10 +597,20 @@ export default function ResultSection({ result, fileName }) {
     provider,
     provider_note: providerNote,
     analysis,
+    episode_id: episodeId,
+    show_notes: showNotes,
   } = result;
 
   const [copied, setCopied] = useState(false);
+  const [notesCopied, setNotesCopied] = useState(false);
   const [openSection, setOpenSection] = useState("");
+  const [showEditor, setShowEditor] = useState(false);
+  const [editedScript, setEditedScript] = useState("");
+
+  // Seed the editor with the current script each time it's opened.
+  useEffect(() => {
+    if (showEditor) setEditedScript(script);
+  }, [showEditor, script]);
 
   const audioSrc = useMemo(() => {
     if (!audioBase64) return null;
@@ -584,6 +655,30 @@ export default function ResultSection({ result, fileName }) {
     window.URL.revokeObjectURL(url);
   };
 
+  // Regenerate: re-run the LLM on the SAME document with new studio settings.
+  const canRegenerate = !!episodeId && !!onRegenerate && !regenerating;
+  // Resynthesize: re-run TTS on an edited script (no LLM call needed).
+  const canResynthesize = !!onResynthesize && !regenerating;
+  const scriptDirty = showEditor && editedScript.trim() !== script.trim();
+
+  // Podcast-platform markdown for the notes card.
+  const copyShowNotes = async () => {
+    if (!showNotes) return;
+    const md = [
+      showNotes.title ? `# ${showNotes.title}` : "",
+      showNotes.description || "",
+      showNotes.takeaways?.length ? "\n## Key takeaways\n" + showNotes.takeaways.map((t) => `- ${t}`).join("\n") : "",
+      showNotes.chapters?.length ? "\n## Chapters\n" + showNotes.chapters.map((c, i) => `${i + 1}. ${c.title} — ${c.summary || ""}`).join("\n") : "",
+    ].filter(Boolean).join("\n");
+    try {
+      await navigator.clipboard.writeText(md);
+      setNotesCopied(true);
+      setTimeout(() => setNotesCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6 animate-fade-up">
       {/* Header row */}
@@ -612,6 +707,98 @@ export default function ResultSection({ result, fileName }) {
           {providerNote && <p>{providerNote}</p>}
           {audioNote && <p className={providerNote ? "mt-1.5" : ""}>{audioNote}</p>}
         </div>
+      )}
+
+      {/* Show notes + chapters */}
+      {showNotes && (showNotes.title || showNotes.takeaways?.length || showNotes.chapters?.length) && (
+        <ShowNotesCard notes={showNotes} onCopy={copyShowNotes} copied={notesCopied} />
+      )}
+
+      {/* Studio actions — tune & re-run without re-uploading (NotebookLM feel) */}
+      <div className="glass rounded-[1.75rem] p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-display text-base font-semibold">
+              Tune this <span className="text-aurora">episode</span>
+            </h3>
+            <p className="mt-1 text-xs text-dim">
+              {episodeId
+                ? "Change the format or tone — the same document regenerates instantly, no re-upload."
+                : "Open an episode from your library to unlock regeneration."}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowEditor((s) => !s)}
+              disabled={regenerating}
+              aria-expanded={showEditor}
+              className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-aurora-cyan/50 disabled:opacity-50"
+            >
+              {showEditor ? "Close editor" : "✎ Edit script"}
+            </button>
+            {canRegenerate && (
+              <button
+                type="button"
+                onClick={onRegenerate}
+                disabled={regenerating}
+                className="btn-aurora rounded-full px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {regenerating ? "Regenerating…" : "↻ Regenerate"}
+              </button>
+            )}
+          </div>
+        </div>
+        {regenerating && (
+          <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10">
+            <div className="h-full rounded-full bg-gradient-to-r from-aurora-violet via-aurora-indigo to-aurora-cyan animate-pulse-soft" style={{ width: "60%" }} />
+          </div>
+        )}
+      </div>
+
+      {/* Script editor — edit, then re-synthesize audio from the edited text */}
+      {showEditor && (
+        <section aria-label="Script editor" className="glass rounded-[1.75rem] p-5 sm:p-7">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="font-display text-lg font-semibold">
+              Edit <span className="text-aurora">script</span>
+            </h3>
+            <p className="text-[11px] text-dim">
+              Keep the "NOVA:" / "RHYS:" prefixes for distinct voices · edits re-synthesize audio, not the AI
+            </p>
+          </div>
+          <textarea
+            value={editedScript}
+            onChange={(e) => setEditedScript(e.target.value)}
+            rows={12}
+            spellCheck={false}
+            className="script-scroll mt-4 w-full resize-y rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm leading-relaxed text-ink/90 focus:outline-none focus:ring-2 focus:ring-aurora-cyan/50 focus:border-transparent"
+            placeholder="NOVA: …\nRHYS: …"
+          />
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs text-dim">
+              {editedScript.trim() ? editedScript.trim().split(/\s+/).length : 0} words
+              {scriptDirty ? " · unsaved changes" : ""}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setEditedScript(script)}
+                className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-white/25"
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                onClick={() => onResynthesize(editedScript)}
+                disabled={!canResynthesize || !editedScript.trim()}
+                className="btn-aurora rounded-full px-5 py-1.5 text-xs font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {regenerating ? "Synthesizing…" : "⇴ Re-synthesize audio"}
+              </button>
+            </div>
+          </div>
+        </section>
       )}
 
       {/* Player */}
@@ -739,11 +926,16 @@ export default function ResultSection({ result, fileName }) {
 
       {/* Intelligence */}
       {openSection && (
-        <IntelligencePanel 
-          analysis={analysis} 
-          openSection={openSection} 
-          onSectionChange={setOpenSection} 
+        <IntelligencePanel
+          analysis={analysis}
+          openSection={openSection}
+          onSectionChange={setOpenSection}
         />
+      )}
+
+      {/* Chat with the document */}
+      {episodeId && authToken && (
+        <ChatPanel authToken={authToken} episodeId={episodeId} />
       )}
     </div>
   );
