@@ -31,16 +31,35 @@ EDGE_VOICES = {
     "RHYS": "en-US-GuyNeural",       # explainer
     "_default": "en-US-JennyNeural",
 }
+EDGE_VOICES_BY_LANGUAGE = {
+    "en": EDGE_VOICES,
+    "hi": {"NOVA": "hi-IN-SwaraNeural", "RHYS": "hi-IN-MadhurNeural", "_default": "hi-IN-SwaraNeural"},
+    "es": {"NOVA": "es-ES-ElviraNeural", "RHYS": "es-ES-AlvaroNeural", "_default": "es-ES-ElviraNeural"},
+    "fr": {"NOVA": "fr-FR-DeniseNeural", "RHYS": "fr-FR-HenriNeural", "_default": "fr-FR-DeniseNeural"},
+    "de": {"NOVA": "de-DE-KatjaNeural", "RHYS": "de-DE-ConradNeural", "_default": "de-DE-KatjaNeural"},
+    "pt": {"NOVA": "pt-BR-FranciscaNeural", "RHYS": "pt-BR-AntonioNeural", "_default": "pt-BR-FranciscaNeural"},
+    "ja": {"NOVA": "ja-JP-NanamiNeural", "RHYS": "ja-JP-KeitaNeural", "_default": "ja-JP-NanamiNeural"},
+}
 GTTS_VOICES = {
     # gTTS has one voice per accent; use different accents to distinguish hosts
     "NOVA": {"lang": "en", "tld": "com"},
     "RHYS": {"lang": "en", "tld": "co.uk"},
     "_default": {"lang": "en", "tld": "com"},
 }
+GTTS_LANGUAGE_CODES = {"en": "en", "hi": "hi", "es": "es", "fr": "fr", "de": "de", "pt": "pt", "ja": "ja"}
 ESPEAK_VOICES = {
     "NOVA": b"en-us+f3",
     "RHYS": b"en-gb+m2",
     "_default": b"en-us+f3",
+}
+ESPEAK_VOICES_BY_LANGUAGE = {
+    "en": ESPEAK_VOICES,
+    "hi": {"NOVA": b"hi+f3", "RHYS": b"hi+m2", "_default": b"hi+f3"},
+    "es": {"NOVA": b"es+f3", "RHYS": b"es+m2", "_default": b"es+f3"},
+    "fr": {"NOVA": b"fr-fr+f3", "RHYS": b"fr-fr+m2", "_default": b"fr-fr+f3"},
+    "de": {"NOVA": b"de+f3", "RHYS": b"de+m2", "_default": b"de+f3"},
+    "pt": {"NOVA": b"pt+f3", "RHYS": b"pt+m2", "_default": b"pt+f3"},
+    "ja": {"NOVA": b"ja+f3", "RHYS": b"ja+m2", "_default": b"ja+f3"},
 }
 # Piper: filenames looked up inside VOICES_DIR (any of these that exist)
 PIPER_VOICES = {
@@ -114,13 +133,13 @@ def split_dialogue(script: str) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def generate_audio_bytes(text: str) -> bytes:
+def generate_audio_bytes(text: str, language: str = "en") -> bytes:
     """Backward-compatible single return value."""
-    audio, _engine, _mime = generate_audio(text)
+    audio, _engine, _mime = generate_audio(text, language)
     return audio
 
 
-def generate_audio(script: str) -> tuple[bytes, str, str]:
+def generate_audio(script: str, language: str = "en") -> tuple[bytes, str, str]:
     """Synthesize the full script (dialogue-aware).
 
     Returns (audio_bytes, engine, mime_type). Raises ValueError only if every
@@ -134,19 +153,21 @@ def generate_audio(script: str) -> tuple[bytes, str, str]:
 
     # Engine 1: Edge-TTS (best quality, distinct neural voices)
     try:
-        return _synthesize_all_edge(segments), "edge-tts", "audio/mpeg"
+        return _synthesize_all_edge(segments, language), "edge-tts", "audio/mpeg"
     except Exception as exc:
         errors.append(f"edge-tts: {exc}")
 
     # Engine 2: gTTS (reliable cloud fallback, host accents differ)
     try:
-        return _synthesize_all_gtts(segments), "gtts", "audio/mpeg"
+        return _synthesize_all_gtts(segments, language), "gtts", "audio/mpeg"
     except Exception as exc:
         errors.append(f"gtts: {exc}")
 
     # Engine 3: Piper neural TTS — fully offline, if voice models are present
     try:
-        audio = _synthesize_all_piper(segments)
+        # Bundled Piper voices are English-only. Avoid an inaccurate voice for
+        # translated narration and continue to the language-capable fallback.
+        audio = _synthesize_all_piper(segments) if language == "en" else None
         if audio:
             return audio, "piper", "audio/wav"
     except Exception as exc:
@@ -154,7 +175,7 @@ def generate_audio(script: str) -> tuple[bytes, str, str]:
 
     # Engine 4: espeak-ng via bundled library — fully offline, always available
     try:
-        return _synthesize_all_espeak(segments), "espeak-ng", "audio/wav"
+        return _synthesize_all_espeak(segments, language), "espeak-ng", "audio/wav"
     except Exception as exc:
         errors.append(f"espeak-ng: {exc}")
 
@@ -164,16 +185,17 @@ def generate_audio(script: str) -> tuple[bytes, str, str]:
 # ---------------------------------------------------------------------------
 # Edge-TTS
 # ---------------------------------------------------------------------------
-def _synthesize_all_edge(segments: list[tuple[str, str]]) -> bytes:
-    return _run_coro_safely(_edge_dialogue(segments))
+def _synthesize_all_edge(segments: list[tuple[str, str]], language: str = "en") -> bytes:
+    return _run_coro_safely(_edge_dialogue(segments, language))
 
 
-async def _edge_dialogue(segments: list[tuple[str, str]]) -> bytes:
+async def _edge_dialogue(segments: list[tuple[str, str]], language: str = "en") -> bytes:
     import edge_tts
 
     parts: list[bytes] = []
     for speaker, content in segments:
-        voice = EDGE_VOICES.get(speaker, EDGE_VOICES["_default"])
+        voices = EDGE_VOICES_BY_LANGUAGE.get(language, EDGE_VOICES)
+        voice = voices.get(speaker, voices["_default"])
         communicate = edge_tts.Communicate(content, voice)
         chunks: list[bytes] = []
         async for chunk in communicate.stream():
@@ -220,7 +242,7 @@ def _run_coro_safely(coro) -> bytes:
 # ---------------------------------------------------------------------------
 # gTTS fallback
 # ---------------------------------------------------------------------------
-def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> bytes:
+def _synthesize_all_gtts(segments: list[tuple[str, str]], language: str = "en") -> bytes:
     from io import BytesIO
 
     from gtts import gTTS
@@ -228,8 +250,9 @@ def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> bytes:
     parts: list[bytes] = []
     for speaker, content in segments:
         cfg = GTTS_VOICES.get(speaker, GTTS_VOICES["_default"])
+        lang = GTTS_LANGUAGE_CODES.get(language, "en")
         buf = BytesIO()
-        gTTS(text=content, lang=cfg["lang"], tld=cfg["tld"]).write_to_fp(buf)
+        gTTS(text=content, lang=lang, tld=cfg["tld"] if lang == "en" else "com").write_to_fp(buf)
         data = buf.getvalue()
         if not data:
             raise ValueError("gTTS produced no audio for a segment.")
@@ -306,7 +329,7 @@ def _espeak_lib():
     return lib, rate
 
 
-def _synthesize_all_espeak(segments: list[tuple[str, str]]) -> bytes:
+def _synthesize_all_espeak(segments: list[tuple[str, str]], language: str = "en") -> bytes:
     import ctypes
 
     with _ESPEAK_LOCK:
@@ -330,7 +353,8 @@ def _synthesize_all_espeak(segments: list[tuple[str, str]]) -> bytes:
         silence = b"\x00" * int(rate * 0.35) * 2  # 350 ms pause between turns
         pcm_parts: list[bytes] = []
         for speaker, content in segments:
-            lib.espeak_SetVoiceByName(ESPEAK_VOICES.get(speaker, ESPEAK_VOICES["_default"]))
+            voices = ESPEAK_VOICES_BY_LANGUAGE.get(language, ESPEAK_VOICES)
+            lib.espeak_SetVoiceByName(voices.get(speaker, voices["_default"]))
             collected.clear()
             data = content.encode("utf-8")
             lib.espeak_Synth(data, len(data) + 1, 0, 0, 0, 1, None, None)  # POS_CHARACTER, espeakCHARS_UTF8

@@ -302,7 +302,11 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
                     doc.images.append(entry)
                     image_budget -= 1
 
-    text = clean_text("\n".join(plumber_pages))
+    # Preserve original page boundaries in the brief. This lets generation cite
+    # the source document even when the requested narration language differs.
+    text = clean_text("\n\n".join(
+        f"[Page {index + 1}]\n{page_text}" for index, page_text in enumerate(plumber_pages)
+    ))
 
     # Figure / graph captions: prefer the stream-order pass (side-by-side
     # captions stay intact), fall back to the layout pass per page.

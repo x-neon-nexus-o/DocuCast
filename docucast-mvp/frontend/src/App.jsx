@@ -45,6 +45,7 @@ export const DEFAULT_STUDIO = {
   tone: "conversational",
   audience: "general",
   focus: "",
+  language: "en",
 };
 
 /* ------------------------------------------------------------------ */
@@ -59,6 +60,7 @@ function loadStudioPrefs() {
       length: ["brief", "standard", "deep"],
       tone: ["conversational", "energetic", "calm", "expert"],
       audience: ["general", "student", "expert", "executive"],
+      language: ["en", "hi", "es", "fr", "de", "pt", "ja"],
     };
     const merged = { ...DEFAULT_STUDIO };
     for (const [key, allowed] of Object.entries(valid)) {
@@ -326,6 +328,7 @@ export default function App() {
     formData.append("tone", studio.tone);
     formData.append("audience", studio.audience);
     formData.append("focus", studio.focus || "");
+    formData.append("language", studio.language);
 
     try {
       const { data } = await axios.post(`${API_URL}/generate`, formData, {
@@ -374,6 +377,7 @@ export default function App() {
       formData.append("tone", studio.tone);
       formData.append("audience", studio.audience);
       formData.append("focus", studio.focus || "");
+      formData.append("language", studio.language);
       const { data } = await axios.post(`${API_URL}/regenerate`, formData, {
         headers: { "Content-Type": "multipart/form-data", Authorization: `Bearer ${authToken}` },
         timeout: 30_000,
@@ -401,7 +405,7 @@ export default function App() {
     setRegenerating(true);
     setError("");
     try {
-      const { data } = await axios.post(`${API_URL}/resynthesize`, { script: editedScript }, {
+      const { data } = await axios.post(`${API_URL}/resynthesize`, { script: editedScript, language: result?.options?.language || studio.language }, {
         headers: { Authorization: `Bearer ${authToken}` },
         timeout: 30_000,
       });
@@ -414,7 +418,7 @@ export default function App() {
     } finally {
       setRegenerating(false);
     }
-  }, [authToken, pollJob, regenerating]);
+  }, [authToken, pollJob, regenerating, result, studio.language]);
 
   // Open an episode from anywhere (dashboard, history) with its audio fetched.
   const openEpisodeById = useCallback(async (episodeId) => {
