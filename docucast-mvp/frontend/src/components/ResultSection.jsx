@@ -625,6 +625,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
 
   const { turns, isDialogue } = useMemo(() => parseTranscript(script), [script]);
   const wordCount = useMemo(() => (script || "").trim().split(/\s+/).length, [script]);
+  const languageLabel = { en: "English", hi: "Hindi", es: "Spanish", fr: "French", de: "German", pt: "Portuguese", ja: "Japanese" }[result.options?.language] || "English";
 
   const engineLabel =
     audioEngine === "edge-tts" ? "neural voices"
@@ -699,6 +700,9 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
         )}
         <span className="rounded-full border border-white/15 px-3 py-1 text-[11px] font-semibold text-dim">
           {wordCount} words
+        </span>
+        <span className="rounded-full border border-aurora-cyan/30 bg-aurora-cyan/10 px-3 py-1 text-[11px] font-semibold text-cyan-100">
+          {languageLabel} narration
         </span>
       </div>
 

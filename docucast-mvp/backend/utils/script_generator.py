@@ -54,12 +54,26 @@ AUDIENCE_PRESETS = {
     "executive": "busy executives — lead with the bottom line, decisions and business impact",
 }
 
+# The value is deliberately a stable language code: it is persisted with an
+# episode and shared with the TTS layer. Add a display name here rather than
+# accepting arbitrary user input into an LLM prompt.
+NARRATION_LANGUAGES = {
+    "en": "English",
+    "hi": "Hindi (Devanagari)",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt": "Portuguese",
+    "ja": "Japanese",
+}
+
 DEFAULT_OPTIONS = {
     "mode": "dialogue",       # dialogue | solo
     "length": "standard",     # brief | standard | deep
     "tone": "conversational",
     "audience": "general",
     "focus": "",              # optional listener steering, e.g. "focus on the results section"
+    "language": "en",          # language of narration; source text remains unchanged
 }
 
 HOST_A = "NOVA"
@@ -71,6 +85,7 @@ def build_system_instruction(options: dict | None = None) -> str:
     length_desc, _ = LENGTH_PRESETS.get(opts["length"], LENGTH_PRESETS["standard"])
     tone = TONE_PRESETS.get(opts["tone"], TONE_PRESETS["conversational"])
     audience = AUDIENCE_PRESETS.get(opts["audience"], AUDIENCE_PRESETS["general"])
+    language = NARRATION_LANGUAGES.get(opts.get("language"), NARRATION_LANGUAGES["en"])
 
     common_rules = f"""
 Rules for Professional Podcasting:
@@ -81,7 +96,9 @@ Rules for Professional Podcasting:
 - Target length: {length_desc}.
 - Tone: {tone}.
 - Audience: {audience}.
-- Output PLAIN spoken text only: NO markdown, NO asterisks, NO emoji, NO stage directions in brackets. Just the words to be spoken.
+- Write the narration in {language}. Translate meaning naturally; keep proper names, product names, quoted terms, measurements, and numbers accurate.
+- Preserve source citations in the written transcript: append a compact citation such as [Source: page 3] or [Source: slide 2] to every factual turn. Cite the original document location, never a translation or an external source. Citation markers are transcript-only and will not be spoken aloud.
+- Apart from those citation markers, output clean spoken text only: no markdown, asterisks, emoji, or stage directions.
 """
     if opts.get("focus"):
         common_rules += f"- Listener steering request (honor it if the document supports it): {opts['focus'][:300]}\n"
@@ -420,7 +437,18 @@ That's the core of what's inside — no fluff, just what matters. Thanks for lis
     if len(words_out) > word_budget + 80:
         script = " ".join(words_out[: word_budget + 80]) + "..."
 
-    return script.strip()
+    # The offline fallback cannot infer per-claim provenance, but it can still
+    # retain a truthful pointer to the original brief. Cloud/LLM scripts use
+    # the stricter per-turn citation instruction above.
+    source_match = re.search(r"\[(Page|Slide)\s+(\d+)[^\]]*\]", text, re.IGNORECASE)
+    citation = (
+        f"[Source: {source_match.group(1).lower()} {source_match.group(2)}]"
+        if source_match else "[Source: original document]"
+    )
+    return "\n".join(
+        f"{line} {citation}" if line.strip() else ""
+        for line in script.strip().splitlines()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +779,8 @@ def _dispatch_provider(provider: str, text: str, system_instruction: str, max_to
 def generate_script_with_provider(text: str, api_key: str = None, options: dict | None = None) -> tuple[str, str]:
     """Generate script, returning (script, provider_used).
 
-    Tries providers in order until one succeeds. Local fallback always succeeds.
+    Tries providers in order until one succeeds. The local fallback is English
+    only, so translated narration requires an LLM-capable provider.
     `options` steers the episode: mode (dialogue|solo), length (brief|standard|deep),
     tone, audience, focus.
     api_key param is kept for backward compat - if provided, it is used as the
@@ -769,6 +798,9 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
 
     for provider in order:
         try:
+            if provider == "local" and current_options.get("language") != "en":
+                errors[provider] = "The offline fallback cannot translate narration."
+                continue
             # Skip providers with no key except ollama/local which can be probed
             if provider == "gemini" and not (os.getenv("GEMINI_API_KEY") or _EXPLICIT_GEMINI_KEY):
                 continue
@@ -789,6 +821,12 @@ def generate_script_with_provider(text: str, api_key: str = None, options: dict 
             errors[provider] = str(exc)
             # For quota/rate limit, continue to next provider immediately
             continue
+
+    if current_options.get("language") != "en":
+        raise ValueError(
+            "No available AI provider could translate this episode. Configure a cloud provider or Ollama, then try again. "
+            f"Provider errors: {errors or 'no translation-capable provider configured'}"
+        )
 
     # Local should never fail - but as absolute safety, call it directly
     try:

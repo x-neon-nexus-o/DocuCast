@@ -39,6 +39,7 @@ from utils.auth import (
 from utils.document_parser import MAX_IMAGES, SUPPORTED_EXTENSIONS, ParsedDocument, parse_document
 from utils.script_generator import (
     DEFAULT_OPTIONS,
+    NARRATION_LANGUAGES,
     answer_question,
     generate_script_with_provider,
     generate_show_notes,
@@ -105,6 +106,7 @@ class RegisterRequest(BaseModel):
 
 class ResynthesizeRequest(BaseModel):
     script: str
+    language: str = "en"
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +349,7 @@ async def generate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    language: str = Form("en"),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     client_ip = _client_ip(request)
@@ -400,6 +403,7 @@ async def generate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "language": language if language in NARRATION_LANGUAGES else DEFAULT_OPTIONS["language"],
     }
 
     # --- Kick off the pipeline in the background; the client polls /jobs/{id} --
@@ -483,7 +487,7 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
     audio_engine: Optional[str] = None
     audio_mime: Optional[str] = None
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime = generate_audio(script, options["language"])
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
@@ -533,6 +537,7 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
             "tone": options["tone"],
             "audience": options["audience"],
             "focus": options["focus"],
+            "language": options["language"],
             "provider": provider_used,
             "audio_engine": audio_engine,
             "audio_mime": audio_mime,
@@ -558,6 +563,7 @@ def regenerate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    language: str = Form("en"),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     """Re-run script generation + TTS for a saved episode WITHOUT re-uploading.
@@ -583,6 +589,7 @@ def regenerate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "language": language if language in NARRATION_LANGUAGES else DEFAULT_OPTIONS["language"],
     }
 
     job_id = _new_job("regenerate")
@@ -608,7 +615,7 @@ def _pipeline_regenerate(report, episode_id: int, source: str, options: dict, us
     audio_engine: Optional[str] = None
     audio_mime: Optional[str] = None
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime = generate_audio(script, options["language"])
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
@@ -617,7 +624,7 @@ def _pipeline_regenerate(report, episode_id: int, source: str, options: dict, us
 
     report("saving", 95)
     try:
-        update_episode_script(username, episode_id, script, audio_base64, audio_engine, audio_mime)
+        update_episode_script(username, episode_id, script, audio_base64, audio_engine, audio_mime, options["language"])
     except Exception as exc:
         audio_error = audio_error or f"Episode update failed: {exc}"
 
@@ -657,14 +664,15 @@ def resynthesize(
         raise HTTPException(status_code=413, detail="Script is too long (max ~60,000 characters).")
 
     job_id = _new_job("resynthesize")
-    _run_job(job_id, lambda report: _pipeline_resynthesize(report, script))
+    language = payload_in.language if payload_in.language in NARRATION_LANGUAGES else DEFAULT_OPTIONS["language"]
+    _run_job(job_id, lambda report: _pipeline_resynthesize(report, script, language))
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
 
-def _pipeline_resynthesize(report, script: str) -> dict:
+def _pipeline_resynthesize(report, script: str, language: str = "en") -> dict:
     report("synthesizing", 60)
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime = generate_audio(script, language)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

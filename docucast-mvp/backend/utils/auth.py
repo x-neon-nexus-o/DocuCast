@@ -59,6 +59,7 @@ def initialize_database() -> None:
                 tone TEXT NOT NULL DEFAULT '',
                 audience TEXT NOT NULL DEFAULT '',
                 focus TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT 'en',
                 provider TEXT NOT NULL DEFAULT '',
                 audio_engine TEXT,
                 audio_mime TEXT,
@@ -92,6 +93,8 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE episodes ADD COLUMN source_text TEXT")
         if "show_notes_json" not in columns:
             connection.execute("ALTER TABLE episodes ADD COLUMN show_notes_json TEXT")
+        if "language" not in columns:
+            connection.execute("ALTER TABLE episodes ADD COLUMN language TEXT NOT NULL DEFAULT 'en'")
 
 
 def _password_hash(password: str, salt: bytes) -> str:
@@ -262,7 +265,7 @@ def _resolve_user_id(connection: sqlite3.Connection, username: str) -> int:
 def save_episode(username: str, episode: dict) -> int:
     """Persist one generated episode, returning its id.
 
-    `episode` keys: filename, doc_type, mode, length, tone, audience, focus,
+    `episode` keys: filename, doc_type, mode, length, tone, audience, focus, language,
     provider, audio_engine, audio_mime, script, audio_base64, analysis_json,
     source_text (enriched parse kept for regeneration), show_notes_json.
     """
@@ -271,10 +274,10 @@ def save_episode(username: str, episode: dict) -> int:
         cursor = connection.execute(
             """
             INSERT INTO episodes (
-                user_id, filename, doc_type, mode, length, tone, audience, focus,
+                user_id, filename, doc_type, mode, length, tone, audience, focus, language,
                 provider, audio_engine, audio_mime, script, audio_base64,
                 analysis_json, source_text, show_notes_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -285,6 +288,7 @@ def save_episode(username: str, episode: dict) -> int:
                 episode.get("tone", ""),
                 episode.get("audience", ""),
                 episode.get("focus", ""),
+                episode.get("language", "en"),
                 episode.get("provider", ""),
                 episode.get("audio_engine"),
                 episode.get("audio_mime"),
@@ -306,7 +310,7 @@ def list_episodes(username: str, limit: int = 50) -> dict:
         user_id = _resolve_user_id(connection, username)
         rows = connection.execute(
             """
-            SELECT id, filename, doc_type, mode, length, tone, audience, focus,
+            SELECT id, filename, doc_type, mode, length, tone, audience, focus, language,
                    provider, audio_engine, audio_mime, script, analysis_json, created_at
             FROM episodes WHERE user_id = ?
             ORDER BY created_at DESC, id DESC
@@ -343,6 +347,7 @@ def list_episodes(username: str, limit: int = 50) -> dict:
                 "tone": r["tone"],
                 "audience": r["audience"],
                 "focus": r["focus"],
+                "language": r["language"] or "en",
             },
             "provider": r["provider"],
             "audio_engine": r["audio_engine"],
@@ -381,6 +386,7 @@ def get_episode(username: str, episode_id: int) -> Optional[dict]:
             "tone": row["tone"],
             "audience": row["audience"],
             "focus": row["focus"],
+            "language": row["language"] or "en",
         },
         "provider": row["provider"],
         "audio_engine": row["audio_engine"],
@@ -405,17 +411,18 @@ def delete_episode(username: str, episode_id: int) -> bool:
 
 
 def update_episode_script(username: str, episode_id: int, script: str,
-                          audio_base64: str, audio_engine: str, audio_mime: str) -> None:
+                          audio_base64: str, audio_engine: str, audio_mime: str,
+                          language: str = "en") -> None:
     """Overwrite an episode's script + audio (used by regenerate / re-synthesize)."""
     with get_connection() as connection:
         user_id = _resolve_user_id(connection, username)
         connection.execute(
             """
             UPDATE episodes
-            SET script = ?, audio_base64 = ?, audio_engine = ?, audio_mime = ?
+            SET script = ?, audio_base64 = ?, audio_engine = ?, audio_mime = ?, language = ?
             WHERE id = ? AND user_id = ?
             """,
-            (script, audio_base64, audio_engine, audio_mime, episode_id, user_id),
+            (script, audio_base64, audio_engine, audio_mime, language, episode_id, user_id),
         )
 
 

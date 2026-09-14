@@ -51,6 +51,19 @@ const STUDIO_GROUPS = [
       { value: "executive", label: "Executives" },
     ],
   },
+  {
+    key: "language",
+    label: "Narration language",
+    options: [
+      { value: "en", label: "English" },
+      { value: "hi", label: "Hindi" },
+      { value: "es", label: "Spanish" },
+      { value: "fr", label: "French" },
+      { value: "de", label: "German" },
+      { value: "pt", label: "Portuguese" },
+      { value: "ja", label: "Japanese" },
+    ],
+  },
 ];
 
 // One-tap focus presets — clicking sets the text; clicking the active one clears.
@@ -283,7 +296,7 @@ export default function UploadSection({
           <span className="text-sm font-semibold text-ink">
             Episode direction
             <span className="ml-2 text-xs font-normal text-dim">
-              {studio.mode === "dialogue" ? "two hosts" : "solo"} · {studio.length} · {studio.tone} · {studio.audience}
+              {studio.mode === "dialogue" ? "two hosts" : "solo"} · {studio.length} · {studio.tone} · {studio.audience} · {STUDIO_GROUPS.find((group) => group.key === "language")?.options.find((option) => option.value === studio.language)?.label || "English"}
             </span>
           </span>
           <span className={`text-dim transition-transform duration-300 ${showTuning ? "rotate-180" : ""}`} aria-hidden="true">
