@@ -60,6 +60,7 @@ DEFAULT_OPTIONS = {
     "tone": "conversational",
     "audience": "general",
     "focus": "",              # optional listener steering, e.g. "focus on the results section"
+    "language": "en",
     "host_a_name": "NOVA",
     "host_b_name": "RHYS",
 }
@@ -75,6 +76,7 @@ def build_system_instruction(options: dict | None = None) -> str:
     length_desc, _ = LENGTH_PRESETS.get(opts["length"], LENGTH_PRESETS["standard"])
     tone = TONE_PRESETS.get(opts["tone"], TONE_PRESETS["conversational"])
     audience = AUDIENCE_PRESETS.get(opts["audience"], AUDIENCE_PRESETS["general"])
+    language = str(opts.get("language") or "en").strip()
 
     common_rules = f"""
 Rules for Professional Podcasting:
@@ -85,6 +87,7 @@ Rules for Professional Podcasting:
 - Target length: {length_desc}.
 - Tone: {tone}.
 - Audience: {audience}.
+- Write the entire spoken script in language code: {language}. Keep the speaker names exactly as labels, but translate every spoken sentence.
 - Output PLAIN spoken text only: NO markdown, NO asterisks, NO emoji, NO stage directions in brackets. Just the words to be spoken.
 """
     if opts.get("focus"):

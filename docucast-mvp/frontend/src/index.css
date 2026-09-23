@@ -26,17 +26,64 @@ html[data-theme="light"] {
 }
 
 html[data-theme="light"] {
-  --bg-page: #f3f4fa;
-  --text-ink: #1a1c2e;
-  --text-dim: #4a5170;
-  --text-faint: #767da0;
-  --glass-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.6));
-  --glass-border: rgba(20, 24, 60, 0.12);
-  --glass-deep-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(240, 242, 252, 0.85));
-  --glass-deep-border: rgba(20, 24, 60, 0.12);
-  --panel-bg: rgba(20, 24, 60, 0.05);
-  --halftone-opacity: 0.1;
-  --aurora-field-bg: radial-gradient(ellipse 80% 55% at 50% -12%, rgba(99, 102, 241, 0.14), transparent 60%), #f3f4fa;
+  --bg-page: #eef2f6;
+  --text-ink: #172033;
+  --text-dim: #526174;
+  --text-faint: #758398;
+  --glass-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.76));
+  --glass-border: rgba(50, 68, 92, 0.16);
+  --glass-deep-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.96), rgba(242, 246, 249, 0.9));
+  --glass-deep-border: rgba(50, 68, 92, 0.16);
+  --panel-bg: rgba(56, 77, 101, 0.055);
+  --halftone-opacity: 0.055;
+  --aurora-field-bg: radial-gradient(ellipse 80% 55% at 50% -12%, rgba(14, 165, 168, 0.1), transparent 60%), #eef2f6;
+}
+
+/* Light mode keeps the aurora character but uses calm, low-glare surfaces. */
+html[data-theme="light"] .aurora-blob {
+  opacity: 0.18;
+}
+
+html[data-theme="light"] .aurora-blob--violet {
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.28), transparent 65%);
+}
+
+html[data-theme="light"] .aurora-blob--cyan {
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.24), transparent 65%);
+}
+
+html[data-theme="light"] .aurora-blob--magenta {
+  background: radial-gradient(circle, rgba(225, 93, 139, 0.16), transparent 65%);
+}
+
+/* Several existing controls use dark-mode translucent utility classes. */
+html[data-theme="light"] [class*="bg-black/"] {
+  background-color: rgba(255, 255, 255, 0.58) !important;
+}
+
+html[data-theme="light"] [class*="bg-white/"] {
+  background-color: rgba(255, 255, 255, 0.52) !important;
+}
+
+html[data-theme="light"] [class*="border-white/"] {
+  border-color: rgba(50, 68, 92, 0.15) !important;
+}
+
+html[data-theme="light"] [class*="text-violet-200"] {
+  color: #6d3fc2 !important;
+}
+
+html[data-theme="light"] [class*="text-cyan-200"] {
+  color: #087f8c !important;
+}
+
+html[data-theme="light"] [class*="text-amber-200"] {
+  color: #95600b !important;
+}
+
+html[data-theme="light"] .btn-aurora {
+  background: linear-gradient(100deg, #6241b8, #315bb5 45%, #087f8c);
+  box-shadow: 0 5px 22px rgba(49, 91, 181, 0.24);
 }
 
 html,

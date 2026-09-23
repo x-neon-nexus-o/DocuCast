@@ -46,6 +46,7 @@ export const DEFAULT_STUDIO = {
   tone: "conversational",
   audience: "general",
   focus: "",
+  language: "en",
   host_a_name: "NOVA",
   host_b_name: "RHYS",
   host_a_voice: "en-US-JennyNeural",
@@ -65,6 +66,7 @@ function loadStudioPrefs() {
     const saved = JSON.parse(raw);
     const valid = {
       mode: ["dialogue", "solo"],
+      language: ["en", "es", "fr", "de", "it", "pt", "hi", "ja"],
       length: ["brief", "standard", "deep"],
       tone: ["conversational", "energetic", "calm", "expert"],
       audience: ["general", "student", "expert", "executive"],
@@ -345,6 +347,7 @@ export default function App() {
     formData.append("tone", studio.tone);
     formData.append("audience", studio.audience);
     formData.append("focus", studio.focus || "");
+    formData.append("language", studio.language || "en");
     for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
       formData.append(key, String(studio[key] ?? ""));
     }
@@ -420,6 +423,7 @@ export default function App() {
       formData.append("tone", studio.tone);
       formData.append("audience", studio.audience);
       formData.append("focus", studio.focus || "");
+      formData.append("language", studio.language || "en");
       for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
         formData.append(key, String(studio[key] ?? ""));
       }

@@ -5,6 +5,16 @@ const API_URL = import.meta.env.VITE_API_URL || "/api";
 const ACCEPTED_EXTENSIONS = [".pdf", ".pptx", ".docx", ".md", ".markdown", ".txt"];
 const MAX_SIZE_MB = 20;
 const MAX_FILES = 5;
+const LANGUAGE_OPTIONS = [
+  ["en", "English", "en-US-JennyNeural", "en-US-GuyNeural"],
+  ["es", "Spanish", "es-ES-ElviraNeural", "es-ES-AlvaroNeural"],
+  ["fr", "French", "fr-FR-DeniseNeural", "fr-FR-HenriNeural"],
+  ["de", "German", "de-DE-KatjaNeural", "de-DE-ConradNeural"],
+  ["it", "Italian", "it-IT-ElsaNeural", "it-IT-DiegoNeural"],
+  ["pt", "Portuguese", "pt-BR-FranciscaNeural", "pt-BR-AntonioNeural"],
+  ["hi", "Hindi", "hi-IN-SwaraNeural", "hi-IN-MadhurNeural"],
+  ["ja", "Japanese", "ja-JP-NanamiNeural", "ja-JP-KeitaNeural"],
+];
 
 const FILE_META = {
   pdf: { label: "PDF", tint: "text-aurora-magenta", glyph: "◰" },
@@ -254,6 +264,7 @@ export default function UploadSection({
   const approvedBrief = briefLines.filter((_line, index) => !excludedLines.has(index)).join("\n").trim();
 
   const updateStudio = (key, value) => setStudio((current) => ({ ...current, [key]: value }));
+  const selectedLanguage = LANGUAGE_OPTIONS.find(([code]) => code === studio.language) || LANGUAGE_OPTIONS[0];
 
   return (
     <section aria-label="Create a podcast" className="glass rounded-[1.75rem] p-5 sm:p-7 shadow-glass">
@@ -664,6 +675,23 @@ export default function UploadSection({
             ))}
 
             <label className="block">
+              <span className="text-[11px] font-semibold uppercase tracking-widest text-faint">Output language</span>
+              <select
+                value={studio.language || "en"}
+                onChange={(e) => {
+                  const next = LANGUAGE_OPTIONS.find(([code]) => code === e.target.value) || LANGUAGE_OPTIONS[0];
+                  updateStudio("language", next[0]);
+                  updateStudio("host_a_voice", next[2]);
+                  updateStudio("host_b_voice", next[3]);
+                }}
+                className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-aurora-cyan/50"
+              >
+                {LANGUAGE_OPTIONS.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+              </select>
+              <span className="mt-1 block text-[11px] text-dim">Scripts and fallback voices will use {selectedLanguage[1]}.</span>
+            </label>
+
+            <label className="block">
               <span className="text-[11px] font-semibold uppercase tracking-widest text-faint">
                 Focus <span className="normal-case font-normal">(optional — steer the episode)</span>
               </span>
@@ -719,7 +747,11 @@ export default function UploadSection({
                       aria-label={`${label} voice`}
                       className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-aurora-violet/50"
                     >
-                      {(voiceCatalog.length ? voiceCatalog : [{ name: "en-US-JennyNeural", label: "Jenny · US" }, { name: "en-US-GuyNeural", label: "Guy · US" }]).map((voice) => <option key={voice.name} value={voice.name}>{voice.label}</option>)}
+                      {[...new Map([
+                        { name: selectedLanguage[2], label: `${selectedLanguage[1]} host A` },
+                        { name: selectedLanguage[3], label: `${selectedLanguage[1]} host B` },
+                        ...voiceCatalog,
+                      ].map((voice) => [voice.name, voice])).values()].map((voice) => <option key={voice.name} value={voice.name}>{voice.label}</option>)}
                     </select>
                     <label className="block text-[11px] text-dim">Speed: {studio[`${prefix}_rate`] > 0 ? "+" : ""}{studio[`${prefix}_rate`]}%
                       <input type="range" min="-30" max="50" step="5" value={studio[`${prefix}_rate`]} onChange={(e) => updateStudio(`${prefix}_rate`, Number(e.target.value))} className="mt-1 w-full accent-cyan-400" />

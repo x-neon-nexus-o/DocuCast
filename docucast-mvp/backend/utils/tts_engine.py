@@ -36,6 +36,16 @@ GTTS_VOICES = {
     "RHYS": {"lang": "en", "tld": "co.uk"},
     "_default": {"lang": "en", "tld": "com"},
 }
+LANGUAGE_DEFAULTS = {
+    "en": {"a": "en-US-JennyNeural", "b": "en-US-GuyNeural", "gtts": "en"},
+    "es": {"a": "es-ES-ElviraNeural", "b": "es-ES-AlvaroNeural", "gtts": "es"},
+    "fr": {"a": "fr-FR-DeniseNeural", "b": "fr-FR-HenriNeural", "gtts": "fr"},
+    "de": {"a": "de-DE-KatjaNeural", "b": "de-DE-ConradNeural", "gtts": "de"},
+    "it": {"a": "it-IT-ElsaNeural", "b": "it-IT-DiegoNeural", "gtts": "it"},
+    "pt": {"a": "pt-BR-FranciscaNeural", "b": "pt-BR-AntonioNeural", "gtts": "pt"},
+    "hi": {"a": "hi-IN-SwaraNeural", "b": "hi-IN-MadhurNeural", "gtts": "hi"},
+    "ja": {"a": "ja-JP-NanamiNeural", "b": "ja-JP-KeitaNeural", "gtts": "ja"},
+}
 ESPEAK_VOICES = {
     "NOVA": b"en-us+f3",
     "RHYS": b"en-gb+m2",
@@ -160,7 +170,7 @@ def generate_audio(script: str, voice_options: Optional[dict] = None) -> tuple[b
 
     # Engine 2: gTTS (reliable cloud fallback, host accents differ)
     try:
-        audio, timeline = _synthesize_all_gtts(segments)
+        audio, timeline = _synthesize_all_gtts(segments, voice_options)
         return audio, "gtts", "audio/mpeg", timeline
     except Exception as exc:
         errors.append(f"gtts: {exc}")
@@ -200,7 +210,8 @@ async def _edge_dialogue(segments: list[tuple[str, str]], voice_options: dict) -
 
     for speaker, content in segments:
         voice_key = "host_a_voice" if speaker == "NOVA" else "host_b_voice" if speaker == "RHYS" else "_default"
-        voice = voice_options.get(voice_key) or EDGE_VOICES.get(speaker, EDGE_VOICES["_default"])
+        language_defaults = LANGUAGE_DEFAULTS.get(str(voice_options.get("language") or "en"), LANGUAGE_DEFAULTS["en"])
+        voice = voice_options.get(voice_key) or language_defaults["a" if speaker == "NOVA" else "b"]
         rate_key = "host_a_rate" if speaker == "NOVA" else "host_b_rate"
         pitch_key = "host_a_pitch" if speaker == "NOVA" else "host_b_pitch"
         rate = int(voice_options.get(rate_key, 0))
@@ -258,7 +269,7 @@ def _run_coro_safely(coro):
 # ---------------------------------------------------------------------------
 # gTTS fallback
 # ---------------------------------------------------------------------------
-def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
+def _synthesize_all_gtts(segments: list[tuple[str, str]], voice_options: Optional[dict] = None) -> tuple[bytes, list[dict]]:
     from io import BytesIO
     from gtts import gTTS
 
@@ -267,7 +278,9 @@ def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> tuple[bytes, list[d
     current_time = 0.0
 
     for speaker, content in segments:
-        cfg = GTTS_VOICES.get(speaker, GTTS_VOICES["_default"])
+        language = str((voice_options or {}).get("language") or "en")
+        language_defaults = LANGUAGE_DEFAULTS.get(language, LANGUAGE_DEFAULTS["en"])
+        cfg = {"lang": language_defaults["gtts"], "tld": "com"}
         buf = BytesIO()
         gTTS(text=content, lang=cfg["lang"], tld=cfg["tld"]).write_to_fp(buf)
         data = buf.getvalue()

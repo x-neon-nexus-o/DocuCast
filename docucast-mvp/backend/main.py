@@ -104,6 +104,7 @@ else:
 AUTH_USERNAME = os.getenv("DOCUCAST_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("DOCUCAST_PASSWORD", "docucast")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DOCUCAST_TOKEN_TTL_SECONDS", "43200"))
+SUPPORTED_LANGUAGES = {"en", "es", "fr", "de", "it", "pt", "hi", "ja"}
 
 
 class LoginRequest(BaseModel):
@@ -440,6 +441,7 @@ async def generate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    language: str = Form("en"),
     redacted_source: str = Form(""),
     host_a_name: str = Form("NOVA"),
     host_b_name: str = Form("RHYS"),
@@ -464,6 +466,7 @@ async def generate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "language": language if language in SUPPORTED_LANGUAGES else "en",
         "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
         "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
         "host_a_voice": host_a_voice,
@@ -689,6 +692,7 @@ def regenerate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    language: str = Form("en"),
     host_a_name: str = Form("NOVA"),
     host_b_name: str = Form("RHYS"),
     host_a_voice: str = Form("en-US-JennyNeural"),
@@ -719,6 +723,7 @@ def regenerate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "language": language if language in SUPPORTED_LANGUAGES else "en",
         "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
         "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
         "host_a_voice": host_a_voice,
@@ -836,6 +841,7 @@ async def batch_generate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    language: str = Form("en"),
     host_a_name: str = Form("NOVA"),
     host_b_name: str = Form("RHYS"),
     host_a_voice: str = Form("en-US-JennyNeural"),
@@ -882,6 +888,7 @@ async def batch_generate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "language": language if language in SUPPORTED_LANGUAGES else "en",
         "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
         "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
         "host_a_voice": host_a_voice,

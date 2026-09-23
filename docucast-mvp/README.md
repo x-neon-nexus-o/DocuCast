@@ -90,6 +90,8 @@ flowchart TB
 - Brief, standard, or deep episode length
 - Multiple tones and audience settings
 - Free-text focus instructions
+- Multilingual scripts and voices: English, Spanish, French, German, Italian, Portuguese, Hindi, and Japanese
+- Language-matched Edge-TTS voices with gTTS language fallback
 - Free-provider fallback chain ending in an offline local summarizer
 - TTS fallback chain so audio generation can continue when a cloud service is unavailable
 
