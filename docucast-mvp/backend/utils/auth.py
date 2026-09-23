@@ -1,4 +1,9 @@
-"""SQLite-backed auth helpers for DocuCast MVP."""
+"""MongoDB-backed auth and data persistence for DocuCast.
+
+Replaces SQLite with MongoDB (PyMongo), storing users, sessions, episodes,
+chat messages, and playlists in actual MongoDB collections inspectable via
+MongoDB Compass.
+"""
 
 from __future__ import annotations
 
@@ -6,93 +11,98 @@ import hashlib
 import json
 import os
 import secrets
-import sqlite3
 import time
-from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
+import pymongo
+from pymongo import MongoClient
+from pymongo.database import Database
 
-DB_PATH = Path(os.getenv("DOCUCAST_DB_PATH", Path(__file__).resolve().parents[1] / "docucast.db"))
 PBKDF2_ITERATIONS = 210_000
+
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "docucast")
+
+_client: Optional[MongoClient] = None
+_db: Optional[Database] = None
+
+
+def get_db() -> Database:
+    """Return the active MongoDB database connection, initializing if needed."""
+    global _client, _db
+    if _db is None:
+        _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        _db = _client[MONGODB_DB_NAME]
+    return _db
 
 
 def _normalize_username(username: str) -> str:
     return username.strip()
 
 
-def get_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+def _safe_object_id(id_val: Any) -> Optional[ObjectId]:
+    if isinstance(id_val, ObjectId):
+        return id_val
+    try:
+        return ObjectId(str(id_val))
+    except (InvalidId, TypeError, ValueError):
+        return None
+
+
+def _safe_create_index(col, *args, **kwargs) -> None:
+    try:
+        col.create_index(*args, **kwargs)
+    except pymongo.errors.OperationFailure as exc:
+        if exc.code == 85:  # IndexOptionsConflict
+            pass
+        else:
+            raise
 
 
 def initialize_database() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with get_connection() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );
+    """Ensure indexes on all MongoDB collections and migrate legacy records."""
+    db = get_db()
+    
+    # Drop conflicting legacy indexes that may cause duplicate key errors
+    try:
+        db.users.drop_index("email_1")
+    except pymongo.errors.OperationFailure:
+        pass  # Index doesn't exist, that's fine
+    try:
+        db.sessions.drop_index("token_1")
+    except pymongo.errors.OperationFailure:
+        pass  # Index doesn't exist, that's fine
+    
+    # Migrate any legacy user documents where username is missing
+    for doc in db.users.find({"username": None}):
+        candidate = doc.get("email") or doc.get("name") or str(doc["_id"])
+        db.users.update_one({"_id": doc["_id"]}, {"$set": {"username": candidate}})
 
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                token_hash TEXT NOT NULL UNIQUE,
-                created_at INTEGER NOT NULL,
-                expires_at INTEGER NOT NULL,
-                last_used_at INTEGER NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
+    # Migrate any legacy sessions where token_hash is missing
+    for doc in db.sessions.find({"token_hash": None}):
+        if doc.get("token"):
+            db.sessions.update_one({"_id": doc["_id"]}, {"$set": {"token_hash": _token_hash(doc["token"])}})
+        else:
+            db.sessions.delete_one({"_id": doc["_id"]})
 
-            CREATE TABLE IF NOT EXISTS episodes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                doc_type TEXT NOT NULL DEFAULT '',
-                mode TEXT NOT NULL DEFAULT '',
-                length TEXT NOT NULL DEFAULT '',
-                tone TEXT NOT NULL DEFAULT '',
-                audience TEXT NOT NULL DEFAULT '',
-                focus TEXT NOT NULL DEFAULT '',
-                provider TEXT NOT NULL DEFAULT '',
-                audio_engine TEXT,
-                audio_mime TEXT,
-                script TEXT NOT NULL,
-                audio_base64 TEXT,
-                analysis_json TEXT,
-                source_text TEXT,
-                show_notes_json TEXT,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes(user_id, created_at DESC);
+    # Users: unique username
+    _safe_create_index(db.users, [("username", pymongo.ASCENDING)], unique=True)
+    # Sessions: fast token lookup and auto-cleanup
+    _safe_create_index(db.sessions, [("token_hash", pymongo.ASCENDING)], unique=True)
+    _safe_create_index(db.sessions, [("expires_at", pymongo.ASCENDING)], expireAfterSeconds=0)
+    # Episodes: per-user list sorted newest-first
+    _safe_create_index(db.episodes, [("username", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
+    # Chat messages: lookup by episode_id
+    _safe_create_index(db.chat_messages, [("episode_id", pymongo.ASCENDING), ("created_at", pymongo.ASCENDING)])
+    # Playlists: per-user list sorted newest-first
+    _safe_create_index(db.playlists, [("username", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
 
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                episode_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_chat_episode ON chat_messages(episode_id, created_at);
-            """
-        )
-        # Lightweight migration: CREATE IF NOT EXISTS won't add columns to an
-        # existing episodes table, so add newer columns separately when missing.
-        columns = {row["name"] for row in connection.execute("PRAGMA table_info(episodes)")}
-        if "source_text" not in columns:
-            connection.execute("ALTER TABLE episodes ADD COLUMN source_text TEXT")
-        if "show_notes_json" not in columns:
-            connection.execute("ALTER TABLE episodes ADD COLUMN show_notes_json TEXT")
 
+# ---------------------------------------------------------------------------
+# Password hashing & verification
+# ---------------------------------------------------------------------------
 
 def _password_hash(password: str, salt: bytes) -> str:
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
@@ -105,6 +115,17 @@ def hash_password(password: str, salt: Optional[bytes] = None) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    if not password_hash:
+        return False
+
+    # Check bcrypt (legacy or standard bcrypt hashes starting with $2a$ or $2b$)
+    if password_hash.startswith("$2a$") or password_hash.startswith("$2b$") or password_hash.startswith("$2y$"):
+        try:
+            import bcrypt
+            return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+        except Exception:
+            return False
+
     try:
         algorithm, iterations, salt_hex, expected_hash = password_hash.split("$")
     except ValueError as exc:
@@ -118,77 +139,54 @@ def verify_password(password: str, password_hash: str) -> bool:
     return secrets.compare_digest(actual_hash, expected_hash)
 
 
+# ---------------------------------------------------------------------------
+# User management
+# ---------------------------------------------------------------------------
+
 def ensure_user(username: str, password: str) -> None:
+    """Create default user if not already present."""
     username = _normalize_username(username)
     if not username:
         return
-
-    with get_connection() as connection:
-        row = connection.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-        if row is not None:
-            return
-        connection.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-            (username, hash_password(password), int(time.time())),
-        )
+    db = get_db()
+    existing = db.users.find_one({"username": username})
+    if existing is not None:
+        return
+    db.users.insert_one({
+        "username": username,
+        "password_hash": hash_password(password),
+        "created_at": int(time.time()),
+    })
 
 
 def authenticate_user(username: str, password: str) -> bool:
-    with get_connection() as connection:
-        row = connection.execute(
-            "SELECT password_hash FROM users WHERE username = ?",
-            (_normalize_username(username),),
-        ).fetchone()
-
-    if row is None:
+    """Verify username & password against MongoDB (supports username or email)."""
+    db = get_db()
+    norm = _normalize_username(username)
+    user = db.users.find_one({"$or": [{"username": norm}, {"email": norm}]})
+    if user is None:
         return False
-    return verify_password(password, row["password_hash"])
+    return verify_password(password, user.get("password_hash", ""))
 
 
 def reset_password(username: str, new_password: str) -> None:
-    """Admin escape hatch: set a user's password directly.
-
-    Intended for `DOCUCAST_RESET_USER`/`DOCUCAST_RESET_PASSWORD` at startup so
-    a forgotten password never permanently locks an account (and its episodes).
-    """
+    """Admin escape hatch: set a user's password directly."""
     username = _normalize_username(username)
     if not username:
         raise ValueError("Username is required.")
     if len(new_password) < 6:
         raise ValueError("Password must be at least 6 characters long.")
-    with get_connection() as connection:
-        cursor = connection.execute(
-            "UPDATE users SET password_hash = ? WHERE username = ?",
-            (hash_password(new_password), username),
-        )
-        if cursor.rowcount == 0:
-            raise ValueError("Unknown user.")
-
-
-def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def create_session(username: str, ttl_seconds: int) -> str:
-    token = secrets.token_urlsafe(48)
-    now = int(time.time())
-    expires_at = now + ttl_seconds
-
-    with get_connection() as connection:
-        row = connection.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-        if row is None:
-            raise ValueError("Unknown user.")
-        connection.execute(
-            """
-            INSERT INTO sessions (user_id, token_hash, created_at, expires_at, last_used_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (row["id"], _token_hash(token), now, expires_at, now),
-        )
-    return token
+    db = get_db()
+    result = db.users.update_one(
+        {"$or": [{"username": username}, {"email": username}]},
+        {"$set": {"password_hash": hash_password(new_password)}}
+    )
+    if result.matched_count == 0:
+        raise ValueError("Unknown user.")
 
 
 def register_user(username: str, password: str) -> None:
+    """Register a new user in MongoDB."""
     username = _normalize_username(username)
     if not username:
         raise ValueError("Username is required.")
@@ -197,295 +195,455 @@ def register_user(username: str, password: str) -> None:
     if len(password) < 6:
         raise ValueError("Password must be at least 6 characters long.")
 
-    with get_connection() as connection:
-        existing = connection.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-        if existing is not None:
-            raise ValueError("That username is already taken.")
+    db = get_db()
+    existing = db.users.find_one({"$or": [{"username": username}, {"email": username}]})
+    if existing is not None:
+        raise ValueError("That username is already taken.")
 
-        try:
-            connection.execute(
-                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (username, hash_password(password), int(time.time())),
-            )
-        except sqlite3.IntegrityError as exc:
-            # Concurrent registration with the same username hit the UNIQUE constraint.
-            raise ValueError("That username is already taken.") from exc
+    try:
+        db.users.insert_one({
+            "username": username,
+            "password_hash": hash_password(password),
+            "created_at": int(time.time()),
+        })
+    except pymongo.errors.DuplicateKeyError as exc:
+        raise ValueError("That username is already taken.") from exc
+
+
+# ---------------------------------------------------------------------------
+# Sessions
+# ---------------------------------------------------------------------------
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_session(username: str, ttl_seconds: int) -> str:
+    """Generate session token and store hash in MongoDB."""
+    token = secrets.token_urlsafe(48)
+    now = int(time.time())
+    expires_at = now + ttl_seconds
+    db = get_db()
+    norm = _normalize_username(username)
+
+    user = db.users.find_one({"$or": [{"username": norm}, {"email": norm}]})
+    if user is None:
+        raise ValueError("Unknown user.")
+
+    canonical_username = user.get("username") or norm
+
+    db.sessions.insert_one({
+        "user_id": user["_id"],
+        "username": canonical_username,
+        "token_hash": _token_hash(token),
+        "created_at": now,
+        "expires_at": expires_at,
+        "last_used_at": now,
+    })
+    return token
 
 
 def verify_session(token: str) -> str:
+    """Validate token from MongoDB, updating last_used_at."""
     now = int(time.time())
     token_digest = _token_hash(token)
+    db = get_db()
 
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT sessions.id AS session_id, sessions.expires_at, users.username
-            FROM sessions
-            JOIN users ON users.id = sessions.user_id
-            WHERE sessions.token_hash = ?
-            """,
-            (token_digest,),
-        ).fetchone()
+    session = db.sessions.find_one({"token_hash": token_digest})
+    if session is None:
+        raise ValueError("Invalid authentication token.")
 
-        if row is None:
-            raise ValueError("Invalid authentication token.")
+    if session["expires_at"] < now:
+        db.sessions.delete_one({"_id": session["_id"]})
+        raise ValueError("Authentication token has expired.")
 
-        if row["expires_at"] < now:
-            connection.execute("DELETE FROM sessions WHERE id = ?", (row["session_id"],))
-            raise ValueError("Authentication token has expired.")
-
-        connection.execute(
-            "UPDATE sessions SET last_used_at = ? WHERE id = ?",
-            (now, row["session_id"]),
-        )
-
-    return row["username"]
+    db.sessions.update_one(
+        {"_id": session["_id"]},
+        {"$set": {"last_used_at": now}}
+    )
+    return session["username"]
 
 
 def revoke_session(token: str) -> None:
     token_digest = _token_hash(token)
-    with get_connection() as connection:
-        connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_digest,))
+    db = get_db()
+    db.sessions.delete_one({"token_hash": token_digest})
 
 
 # ---------------------------------------------------------------------------
-# Episodes (saved podcast generations, one row per /generate call)
+# Episodes
 # ---------------------------------------------------------------------------
 
-def _resolve_user_id(connection: sqlite3.Connection, username: str) -> int:
-    row = connection.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-    if row is None:
-        raise ValueError("Unknown user.")
-    return row["id"]
+def save_episode(username: str, episode: dict) -> str:
+    """Persist one generated episode in MongoDB, returning its string ID."""
+    db = get_db()
+    user = db.users.find_one({"username": username})
+    user_id = user["_id"] if user else None
 
+    # Normalise analysis & show_notes if passed as json strings
+    analysis = episode.get("analysis")
+    if isinstance(analysis, str):
+        try:
+            analysis = json.loads(analysis)
+        except Exception:
+            analysis = None
+    elif not analysis and episode.get("analysis_json"):
+        try:
+            analysis = json.loads(episode["analysis_json"])
+        except Exception:
+            analysis = None
 
-def save_episode(username: str, episode: dict) -> int:
-    """Persist one generated episode, returning its id.
+    show_notes = episode.get("show_notes")
+    if isinstance(show_notes, str):
+        try:
+            show_notes = json.loads(show_notes)
+        except Exception:
+            show_notes = None
+    elif not show_notes and episode.get("show_notes_json"):
+        try:
+            show_notes = json.loads(episode["show_notes_json"])
+        except Exception:
+            show_notes = None
 
-    `episode` keys: filename, doc_type, mode, length, tone, audience, focus,
-    provider, audio_engine, audio_mime, script, audio_base64, analysis_json,
-    source_text (enriched parse kept for regeneration), show_notes_json.
-    """
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        cursor = connection.execute(
-            """
-            INSERT INTO episodes (
-                user_id, filename, doc_type, mode, length, tone, audience, focus,
-                provider, audio_engine, audio_mime, script, audio_base64,
-                analysis_json, source_text, show_notes_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                episode.get("filename", ""),
-                episode.get("doc_type", ""),
-                episode.get("mode", ""),
-                episode.get("length", ""),
-                episode.get("tone", ""),
-                episode.get("audience", ""),
-                episode.get("focus", ""),
-                episode.get("provider", ""),
-                episode.get("audio_engine"),
-                episode.get("audio_mime"),
-                episode.get("script", ""),
-                episode.get("audio_base64"),
-                episode.get("analysis_json"),
-                episode.get("source_text"),
-                episode.get("show_notes_json"),
-                int(time.time()),
-            ),
-        )
-        return cursor.lastrowid
+    doc = {
+        "user_id": user_id,
+        "username": username,
+        "filename": episode.get("filename", ""),
+        "doc_type": episode.get("doc_type", ""),
+        "mode": episode.get("mode", ""),
+        "length": episode.get("length", ""),
+        "tone": episode.get("tone", ""),
+        "audience": episode.get("audience", ""),
+        "focus": episode.get("focus", ""),
+        "provider": episode.get("provider", ""),
+        "audio_engine": episode.get("audio_engine"),
+        "audio_mime": episode.get("audio_mime"),
+        "script": episode.get("script", ""),
+        "audio_base64": episode.get("audio_base64"),
+        "transcript_segments": episode.get("transcript_segments") or [],
+        "analysis": analysis,
+        "source_text": episode.get("source_text"),
+        "show_notes": show_notes,
+        "playlist_id": episode.get("playlist_id"),
+        "created_at": int(time.time()),
+    }
+    result = db.episodes.insert_one(doc)
+    return str(result.inserted_id)
 
 
 def list_episodes(username: str, limit: int = 50) -> dict:
-    """Return {episodes, stats} for the user — episodes newest first WITHOUT
-    audio blobs, stats for the dashboard (totals across ALL episodes)."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        rows = connection.execute(
-            """
-            SELECT id, filename, doc_type, mode, length, tone, audience, focus,
-                   provider, audio_engine, audio_mime, script, analysis_json, created_at
-            FROM episodes WHERE user_id = ?
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (user_id, limit),
-        ).fetchall()
-        stats_row = connection.execute(
-            """
-            SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS last_7d,
-                   MAX(created_at) AS latest,
-                   SUM(CASE WHEN audio_base64 IS NOT NULL AND audio_base64 != '' THEN 1 ELSE 0 END) AS with_audio
-            FROM episodes WHERE user_id = ?
-            """,
-            (int(time.time()) - 7 * 86400, user_id),
-        ).fetchone()
-        type_rows = connection.execute(
-            """
-            SELECT doc_type, COUNT(*) AS n FROM episodes
-            WHERE user_id = ? AND doc_type != '' GROUP BY doc_type ORDER BY n DESC
-            """,
-            (user_id,),
-        ).fetchall()
+    """Return {episodes, stats} for the user without heavy audio blobs."""
+    db = get_db()
+    cursor = db.episodes.find(
+        {"username": username},
+        projection={"audio_base64": 0, "source_text": 0}
+    ).sort("created_at", pymongo.DESCENDING).limit(limit)
+
     episodes = []
-    for r in rows:
+    for doc in cursor:
         episodes.append({
-            "id": r["id"],
-            "filename": r["filename"],
-            "doc_type": r["doc_type"],
+            "id": str(doc["_id"]),
+            "filename": doc.get("filename", ""),
+            "doc_type": doc.get("doc_type", ""),
             "options": {
-                "mode": r["mode"],
-                "length": r["length"],
-                "tone": r["tone"],
-                "audience": r["audience"],
-                "focus": r["focus"],
+                "mode": doc.get("mode", ""),
+                "length": doc.get("length", ""),
+                "tone": doc.get("tone", ""),
+                "audience": doc.get("audience", ""),
+                "focus": doc.get("focus", ""),
             },
-            "provider": r["provider"],
-            "audio_engine": r["audio_engine"],
-            "audio_mime": r["audio_mime"],
-            "script": r["script"],
-            "analysis": json.loads(r["analysis_json"]) if r["analysis_json"] else None,
-            "created_at": r["created_at"],
+            "provider": doc.get("provider", ""),
+            "audio_engine": doc.get("audio_engine"),
+            "audio_mime": doc.get("audio_mime"),
+            "script": doc.get("script", ""),
+            "transcript_segments": doc.get("transcript_segments") or [],
+            "analysis": doc.get("analysis"),
+            "playlist_id": doc.get("playlist_id"),
+            "created_at": doc.get("created_at", 0),
         })
+
+    total = db.episodes.count_documents({"username": username})
+    seven_days_ago = int(time.time()) - 7 * 86400
+    last_7d = db.episodes.count_documents({"username": username, "created_at": {"$gte": seven_days_ago}})
+    with_audio = db.episodes.count_documents({
+        "username": username,
+        "audio_base64": {"$exists": True, "$ne": None, "$ne": ""}
+    })
+
+    latest_doc = db.episodes.find_one({"username": username}, sort=[("created_at", pymongo.DESCENDING)])
+    latest_at = latest_doc.get("created_at") if latest_doc else None
+
+    # Aggregation for doc types
+    pipeline = [
+        {"$match": {"username": username, "doc_type": {"$ne": ""}}},
+        {"$group": {"_id": "$doc_type", "n": {"$sum": 1}}},
+        {"$sort": {"n": -1}}
+    ]
+    type_counts = {item["_id"]: item["n"] for item in db.episodes.aggregate(pipeline)}
+
     stats = {
-        "total": stats_row["total"] or 0,
-        "last_7d": stats_row["last_7d"] or 0,
-        "with_audio": stats_row["with_audio"] or 0,
-        "latest_at": stats_row["latest"],
-        "doc_types": {row["doc_type"]: row["n"] for row in type_rows},
+        "total": total,
+        "last_7d": last_7d,
+        "with_audio": with_audio,
+        "latest_at": latest_at,
+        "doc_types": type_counts,
     }
     return {"episodes": episodes, "stats": stats}
 
 
-def get_episode(username: str, episode_id: int) -> Optional[dict]:
+def get_episode(username: str, episode_id: Any) -> Optional[dict]:
     """Fetch one episode (including audio) if it belongs to the user."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        row = connection.execute(
-            "SELECT * FROM episodes WHERE id = ? AND user_id = ?",
-            (episode_id, user_id),
-        ).fetchone()
-    if row is None:
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(episode_id)
+
+    doc = db.episodes.find_one(query)
+    if doc is None:
         return None
+
     return {
-        "id": row["id"],
-        "filename": row["filename"],
-        "doc_type": row["doc_type"],
+        "id": str(doc["_id"]),
+        "filename": doc.get("filename", ""),
+        "doc_type": doc.get("doc_type", ""),
         "options": {
-            "mode": row["mode"],
-            "length": row["length"],
-            "tone": row["tone"],
-            "audience": row["audience"],
-            "focus": row["focus"],
+            "mode": doc.get("mode", ""),
+            "length": doc.get("length", ""),
+            "tone": doc.get("tone", ""),
+            "audience": doc.get("audience", ""),
+            "focus": doc.get("focus", ""),
         },
-        "provider": row["provider"],
-        "audio_engine": row["audio_engine"],
-        "audio_mime": row["audio_mime"],
-        "script": row["script"],
-        "audio_base64": row["audio_base64"],
-        "analysis": json.loads(row["analysis_json"]) if row["analysis_json"] else None,
-        "show_notes": json.loads(row["show_notes_json"]) if row.get("show_notes_json") else None,
-        "created_at": row["created_at"],
+        "provider": doc.get("provider", ""),
+        "audio_engine": doc.get("audio_engine"),
+        "audio_mime": doc.get("audio_mime"),
+        "script": doc.get("script", ""),
+        "audio_base64": doc.get("audio_base64"),
+        "transcript_segments": doc.get("transcript_segments") or [],
+        "analysis": doc.get("analysis"),
+        "show_notes": doc.get("show_notes"),
+        "playlist_id": doc.get("playlist_id"),
+        "created_at": doc.get("created_at", 0),
     }
 
 
-def delete_episode(username: str, episode_id: int) -> bool:
-    """Delete one of the user's episodes. Returns True if a row was removed."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        cursor = connection.execute(
-            "DELETE FROM episodes WHERE id = ? AND user_id = ?",
-            (episode_id, user_id),
-        )
-        return cursor.rowcount > 0
+def delete_episode(username: str, episode_id: Any) -> bool:
+    """Delete an episode and its chat messages. Returns True if removed."""
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(episode_id)
+
+    result = db.episodes.delete_one(query)
+    if result.deleted_count > 0:
+        db.chat_messages.delete_many({"episode_id": str(episode_id), "username": username})
+        return True
+    return False
 
 
-def update_episode_script(username: str, episode_id: int, script: str,
-                          audio_base64: str, audio_engine: str, audio_mime: str) -> None:
-    """Overwrite an episode's script + audio (used by regenerate / re-synthesize)."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        connection.execute(
-            """
-            UPDATE episodes
-            SET script = ?, audio_base64 = ?, audio_engine = ?, audio_mime = ?
-            WHERE id = ? AND user_id = ?
-            """,
-            (script, audio_base64, audio_engine, audio_mime, episode_id, user_id),
-        )
+def update_episode_script(
+    username: str,
+    episode_id: Any,
+    script: str,
+    audio_base64: str,
+    audio_engine: str,
+    audio_mime: str,
+    transcript_segments: Optional[list] = None,
+) -> None:
+    """Overwrite script, audio and optional timestamps."""
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(episode_id)
+
+    update_fields: dict[str, Any] = {
+        "script": script,
+        "audio_base64": audio_base64,
+        "audio_engine": audio_engine,
+        "audio_mime": audio_mime,
+    }
+    if transcript_segments is not None:
+        update_fields["transcript_segments"] = transcript_segments
+
+    db.episodes.update_one(query, {"$set": update_fields})
 
 
-def get_episode_source(username: str, episode_id: int) -> Optional[str]:
-    """Return the stored enriched source text for regeneration (None if missing)."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        row = connection.execute(
-            "SELECT source_text FROM episodes WHERE id = ? AND user_id = ?",
-            (episode_id, user_id),
-        ).fetchone()
-    if row is None:
+def get_episode_source(username: str, episode_id: Any) -> Optional[str]:
+    """Return stored source text for regeneration."""
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(episode_id)
+
+    doc = db.episodes.find_one(query, projection={"source_text": 1})
+    if doc is None:
         return None
-    return row["source_text"]
+    return doc.get("source_text")
 
 
 # ---------------------------------------------------------------------------
-# Chat (Q&A grounded in an episode's source text)
+# Chat
 # ---------------------------------------------------------------------------
-def add_chat_message(username: str, episode_id: int, role: str, content: str) -> int:
-    """Append one chat turn for the user's episode, returning its id."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        # Ownership check via the episodes FK (raises if the row isn't theirs).
-        owns = connection.execute(
-            "SELECT 1 FROM episodes WHERE id = ? AND user_id = ?",
-            (episode_id, user_id),
-        ).fetchone()
-        if owns is None:
-            raise ValueError("Episode not found.")
-        cursor = connection.execute(
-            """
-            INSERT INTO chat_messages (user_id, episode_id, role, content, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (user_id, episode_id, role, content, int(time.time())),
-        )
-        return cursor.lastrowid
+
+def add_chat_message(username: str, episode_id: Any, role: str, content: str) -> str:
+    """Append one chat turn for the user's episode, returning its string ID."""
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(episode_id)
+
+    owns = db.episodes.find_one(query, projection={"_id": 1})
+    if owns is None:
+        raise ValueError("Episode not found.")
+
+    res = db.chat_messages.insert_one({
+        "username": username,
+        "episode_id": str(episode_id),
+        "role": role,
+        "content": content,
+        "created_at": int(time.time()),
+    })
+    return str(res.inserted_id)
 
 
-def list_chat_messages(username: str, episode_id: int, limit: int = 100) -> list:
-    """Return the chat history for one of the user's episodes, oldest first."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        rows = connection.execute(
-            """
-            SELECT c.role, c.content, c.created_at
-            FROM chat_messages c
-            JOIN episodes e ON e.id = c.episode_id
-            WHERE c.episode_id = ? AND e.user_id = ?
-            ORDER BY c.id ASC LIMIT ?
-            """,
-            (episode_id, user_id, limit),
-        ).fetchall()
+def list_chat_messages(username: str, episode_id: Any, limit: int = 100) -> list:
+    """Return chat history for one of the user's episodes, oldest first."""
+    db = get_db()
+    cursor = db.chat_messages.find({
+        "username": username,
+        "episode_id": str(episode_id),
+    }).sort("created_at", pymongo.ASCENDING).limit(limit)
+
     return [
-        {"role": r["role"], "content": r["content"], "created_at": r["created_at"]}
-        for r in rows
+        {"role": r.get("role", ""), "content": r.get("content", ""), "created_at": r.get("created_at", 0)}
+        for r in cursor
     ]
 
 
-def clear_chat_messages(username: str, episode_id: int) -> int:
-    """Delete the chat history for one of the user's episodes. Returns rows removed."""
-    with get_connection() as connection:
-        user_id = _resolve_user_id(connection, username)
-        cursor = connection.execute(
-            """
-            DELETE FROM chat_messages
-            WHERE episode_id = ? AND user_id = ?
-            """,
-            (episode_id, user_id),
-        )
-        return cursor.rowcount
+def clear_chat_messages(username: str, episode_id: Any) -> int:
+    """Delete the chat history for an episode. Returns count removed."""
+    db = get_db()
+    res = db.chat_messages.delete_many({
+        "username": username,
+        "episode_id": str(episode_id),
+    })
+    return res.deleted_count
 
+
+# ---------------------------------------------------------------------------
+# Playlists (Feature 6: Batch Mode & Playlists)
+# ---------------------------------------------------------------------------
+
+def save_playlist(username: str, title: str, description: str = "", episode_ids: Optional[list[str]] = None) -> str:
+    """Create a new playlist in MongoDB."""
+    db = get_db()
+    user = db.users.find_one({"username": username})
+    user_id = user["_id"] if user else None
+
+    doc = {
+        "user_id": user_id,
+        "username": username,
+        "title": title.strip() or "Untitled Series",
+        "description": description.strip(),
+        "episode_ids": episode_ids or [],
+        "created_at": int(time.time()),
+    }
+    result = db.playlists.insert_one(doc)
+    return str(result.inserted_id)
+
+
+def list_playlists(username: str, limit: int = 50) -> list[dict]:
+    """List playlists for a user with episode count and total duration estimate."""
+    db = get_db()
+    cursor = db.playlists.find({"username": username}).sort("created_at", pymongo.DESCENDING).limit(limit)
+    playlists = []
+    for doc in cursor:
+        ep_ids = doc.get("episode_ids", [])
+        playlists.append({
+            "id": str(doc["_id"]),
+            "title": doc.get("title", ""),
+            "description": doc.get("description", ""),
+            "episode_ids": ep_ids,
+            "episode_count": len(ep_ids),
+            "created_at": doc.get("created_at", 0),
+        })
+    return playlists
+
+
+def get_playlist(username: str, playlist_id: Any) -> Optional[dict]:
+    """Get playlist details including resolved episode summaries."""
+    db = get_db()
+    obj_id = _safe_object_id(playlist_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(playlist_id)
+
+    doc = db.playlists.find_one(query)
+    if doc is None:
+        return None
+
+    # Resolve episodes
+    ep_ids = doc.get("episode_ids", [])
+    resolved_episodes = []
+    for ep_id in ep_ids:
+        ep = get_episode(username, ep_id)
+        if ep:
+            resolved_episodes.append(ep)
+
+    return {
+        "id": str(doc["_id"]),
+        "title": doc.get("title", ""),
+        "description": doc.get("description", ""),
+        "episode_ids": ep_ids,
+        "episodes": resolved_episodes,
+        "episode_count": len(resolved_episodes),
+        "created_at": doc.get("created_at", 0),
+    }
+
+
+def delete_playlist(username: str, playlist_id: Any) -> bool:
+    """Delete a playlist from MongoDB."""
+    db = get_db()
+    obj_id = _safe_object_id(playlist_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(playlist_id)
+
+    res = db.playlists.delete_one(query)
+    return res.deleted_count > 0
+
+
+def add_episode_to_playlist(username: str, playlist_id: Any, episode_id: str) -> bool:
+    """Add an episode to an existing playlist."""
+    db = get_db()
+    obj_id = _safe_object_id(playlist_id)
+    query: dict[str, Any] = {"username": username}
+    if obj_id:
+        query["_id"] = obj_id
+    else:
+        query["_id"] = str(playlist_id)
+
+    res = db.playlists.update_one(query, {"$addToSet": {"episode_ids": str(episode_id)}})
+    # Also tag episode
+    ep_obj = _safe_object_id(episode_id)
+    if ep_obj:
+        db.episodes.update_one({"_id": ep_obj}, {"$set": {"playlist_id": str(playlist_id)}})
+    return res.modified_count > 0

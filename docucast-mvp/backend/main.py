@@ -3,12 +3,19 @@
 import base64
 import json
 import os
+import sys
 import threading
 import time
 import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List, Optional
+
+# Keep imports working when launched as either `main:app` from backend or
+# `backend.main:app` from the repository root.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -17,35 +24,41 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from utils.auth import (
+from backend.utils.auth import (
     add_chat_message,
+    add_episode_to_playlist,
     authenticate_user,
     clear_chat_messages,
     create_session,
     delete_episode,
+    delete_playlist,
     ensure_user,
     get_episode,
     get_episode_source,
+    get_playlist,
     initialize_database,
     list_chat_messages,
     list_episodes,
+    list_playlists,
     register_user,
     reset_password,
     revoke_session,
     save_episode,
+    save_playlist,
     update_episode_script,
     verify_session,
 )
-from utils.document_parser import MAX_IMAGES, SUPPORTED_EXTENSIONS, ParsedDocument, parse_document
-from utils.script_generator import (
+from backend.utils.document_parser import MAX_IMAGES, SUPPORTED_EXTENSIONS, ParsedDocument, parse_document
+from backend.utils.script_generator import (
     DEFAULT_OPTIONS,
     answer_question,
     generate_script_with_provider,
     generate_show_notes,
     get_available_providers,
 )
-from utils.tts_engine import generate_audio
-from utils.vision import vision_available
+from backend.utils.tts_engine import generate_audio
+from backend.utils.url_ingestion import ingest_url, is_youtube_url
+from backend.utils.vision import vision_available
 
 load_dotenv()
 
@@ -338,10 +351,31 @@ def jobs_get(job_id: str, current_user: str = Depends(_require_user)) -> dict:
     return job
 
 
+@app.post("/ingest-preview")
+def ingest_preview(payload: dict, current_user: str = Depends(_require_user)) -> dict:
+    """Preview URL content (article or YouTube) before generating."""
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required.")
+    try:
+        parsed = ingest_url(url)
+        return {
+            "doc_type": parsed.doc_type,
+            "title": parsed.stats.get("title", url),
+            "stats": parsed.stats,
+            "preview_text": parsed.enriched_text()[:600] + "...",
+            "warnings": parsed.warnings,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/generate")
 async def generate(
     request: Request,
-    files: List[UploadFile] = File(...),
+    files: Optional[List[UploadFile]] = File(None),
+    url: Optional[str] = Form(None),
+    playlist_id: Optional[str] = Form(None),
     mode: str = Form("dialogue"),
     length: str = Form("standard"),
     tone: str = Form("conversational"),
@@ -352,9 +386,25 @@ async def generate(
     client_ip = _client_ip(request)
     _check_throttle(client_ip)
 
-    # --- Validate files (fast, synchronous — bad uploads fail immediately) ----
-    if not files:
-        raise HTTPException(status_code=400, detail="No file uploaded.")
+    clean_url = (url or "").strip()
+    if not files and not clean_url:
+        raise HTTPException(status_code=400, detail="Please upload a document or provide an article/YouTube link.")
+
+    options = {
+        "mode": mode if mode in {"dialogue", "solo"} else DEFAULT_OPTIONS["mode"],
+        "length": length if length in {"brief", "standard", "deep"} else DEFAULT_OPTIONS["length"],
+        "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
+        "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
+        "focus": (focus or "").strip()[:300],
+    }
+
+    # Case 1: URL / YouTube ingestion
+    if clean_url:
+        job_id = _new_job("generate")
+        _run_job(job_id, lambda report: _pipeline_generate_url(report, clean_url, options, current_user, playlist_id))
+        return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
+
+    # Case 2: Document upload
     if len(files) > 5:
         raise HTTPException(status_code=400, detail="Upload at most 5 documents per episode.")
 
@@ -393,32 +443,28 @@ async def generate(
             )
         prepared.append((filename, file_bytes))
 
-    # --- Validate options ------------------------------------------------------
-    options = {
-        "mode": mode if mode in {"dialogue", "solo"} else DEFAULT_OPTIONS["mode"],
-        "length": length if length in {"brief", "standard", "deep"} else DEFAULT_OPTIONS["length"],
-        "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
-        "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
-        "focus": (focus or "").strip()[:300],
-    }
-
-    # --- Kick off the pipeline in the background; the client polls /jobs/{id} --
     job_id = _new_job("generate")
-    _run_job(job_id, lambda report: _pipeline_generate(report, prepared, options, current_user))
+    _run_job(job_id, lambda report: _pipeline_generate_files(report, prepared, options, current_user, playlist_id))
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
 
-def _pipeline_generate(report, prepared: list, options: dict, username: str) -> dict:
-    """The full parse → script → TTS pipeline with real progress reporting.
+def _pipeline_generate_url(report, url: str, options: dict, username: str, playlist_id: Optional[str] = None) -> dict:
+    """Ingest a web article or YouTube URL and run script + TTS."""
+    report("ingesting url", 10)
+    try:
+        parsed = ingest_url(url)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Failed to ingest URL: {exc}") from exc
 
-    `prepared` is [(filename, bytes), ...] — one source or several. Multiple
-    documents are parsed separately and their briefs merged with per-source
-    labels so the hosts can compare and connect the material.
-    """
-    # --- Parse every source ----------------------------------------------------
+    title = parsed.stats.get("title") or url
+    return _synthesize_and_save(report, parsed, title, options, username, playlist_id, start_pct=25)
+
+
+def _pipeline_generate_files(report, prepared: list, options: dict, username: str, playlist_id: Optional[str] = None) -> dict:
+    """The multi-file parse → script → TTS pipeline with real progress reporting."""
     parsed_docs = []
     for i, (filename, file_bytes) in enumerate(prepared):
-        share = 5 + int(10 * (i + 1) / len(prepared))  # parsing spans ~5-15%
+        share = 5 + int(15 * (i + 1) / len(prepared))
         report(f"parsing ({i + 1}/{len(prepared)})", share)
         try:
             parsed = parse_document(file_bytes, filename)
@@ -433,9 +479,7 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
             )
         parsed_docs.append((filename, parsed))
 
-    # --- Merge briefs (multi-doc episodes get labeled sections) ----------------
     if len(parsed_docs) == 1:
-        enriched = parsed_docs[0][1].enriched_text()
         merged = parsed_docs[0][1]
         display_name = parsed_docs[0][0]
     else:
@@ -450,12 +494,27 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
             combined.handwritten_notes.extend(parsed.handwritten_notes)
             combined.speaker_notes.extend(parsed.speaker_notes)
             combined.warnings.extend(parsed.warnings)
-        enriched = "\n\n".join(sections)
+        combined.text = "\n\n".join(sections)
         merged = combined
         display_name = " + ".join(name for name, _ in parsed_docs)
 
-    # --- Script ------------------------------------------------------------------
-    report("script", 45)
+    return _synthesize_and_save(report, merged, display_name, options, username, playlist_id, start_pct=25)
+
+
+def _synthesize_and_save(
+    report,
+    doc: ParsedDocument,
+    display_name: str,
+    options: dict,
+    username: str,
+    playlist_id: Optional[str] = None,
+    start_pct: int = 25,
+) -> dict:
+    """Common generation, voicing with timestamps, and MongoDB persistence."""
+    enriched = doc.enriched_text()
+
+    # --- Script ---
+    report("script", start_pct + 15)
     try:
         script, provider_used = generate_script_with_provider(enriched, None, options)
     except ValueError as exc:
@@ -464,70 +523,61 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
             msg += " Tip: Set GROQ_API_KEY (free at console.groq.com) or LLM_PROVIDER=local for unlimited offline."
         raise HTTPException(status_code=502, detail=msg) from exc
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Script generation failed: {exc}. Try setting GROQ_API_KEY or LLM_PROVIDER=local"
-        ) from exc
+        raise HTTPException(status_code=502, detail=f"Script generation failed: {exc}") from exc
 
-    # --- Show notes + chapters (best-effort; skipped if no provider can) ---------
-    report("show notes", 55)
+    # --- Show notes ---
+    report("show notes", start_pct + 30)
     show_notes = None
     try:
         show_notes = generate_show_notes(script, options)
     except Exception:
         show_notes = None
 
-    # --- Audio --------------------------------------------------------------------
-    report("synthesizing", 75)
+    # --- Audio with per-turn timestamps (Feature 5) ---
+    report("synthesizing", start_pct + 50)
     audio_base64: Optional[str] = None
     audio_error: Optional[str] = None
     audio_engine: Optional[str] = None
     audio_mime: Optional[str] = None
+    transcript_segments: list = []
+
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
     except Exception as exc:
         audio_error = f"Audio synthesis failed: {exc}"
 
-    # --- Analysis payload (multi-doc merges stats/warnings) ------------------------
-    analysis = merged.summary_payload()
-    analysis["sources"] = [name for name, _ in parsed_docs]
-    if len(parsed_docs) > 1:
-        analysis["warnings"].insert(
-            0, f"Episode synthesized from {len(parsed_docs)} documents: {display_name}."
-        )
-
+    analysis = doc.summary_payload()
     payload: dict = {
         "script": script,
         "audio_base64": audio_base64,
         "audio_engine": audio_engine,
         "audio_mime": audio_mime,
+        "transcript_segments": transcript_segments,
         "provider": provider_used,
         "options": options,
         "analysis": analysis,
         "filename": display_name,
         "show_notes": show_notes,
+        "playlist_id": playlist_id,
     }
     if audio_engine == "espeak-ng":
         payload["audio_note"] = (
-            "Audio was synthesized with the offline fallback voice (cloud TTS unreachable). "
-            "It always works, but sounds robotic — on a normal network you'll get neural voices automatically."
+            "Audio was synthesized with the offline fallback voice. "
+            "On a normal network you'll get neural voices automatically."
         )
     if audio_error:
         payload["audio_error"] = audio_error
-    if provider_used == "local":
-        payload["provider_note"] = "Generated with local fallback (no API) - unlimited. For higher quality, set GROQ_API_KEY (free)."
-    elif provider_used != "gemini":
-        payload["provider_note"] = f"Generated with {provider_used} (Gemini alternative) - free tier."
 
-    # --- Persist to the user's history (best-effort; never fails the request) -----
+    # --- Persist to MongoDB ---
     report("saving", 95)
-    episode_id: Optional[int] = None
+    episode_id: Optional[str] = None
     try:
         episode_id = save_episode(username, {
             "filename": display_name,
-            "doc_type": merged.doc_type,
+            "doc_type": doc.doc_type,
             "mode": options["mode"],
             "length": options["length"],
             "tone": options["tone"],
@@ -538,13 +588,17 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
             "audio_mime": audio_mime,
             "script": script,
             "audio_base64": audio_base64,
-            "analysis_json": json.dumps(analysis),
+            "transcript_segments": transcript_segments,
+            "analysis": analysis,
             "source_text": enriched,
-            "show_notes_json": json.dumps(show_notes) if show_notes else None,
+            "show_notes": show_notes,
+            "playlist_id": playlist_id,
         })
         payload["episode_id"] = episode_id
-    except Exception as exc:  # history is a nicety, not a requirement
-        payload["history_error"] = f"Episode could not be saved to history: {exc}"
+        if playlist_id:
+            add_episode_to_playlist(username, playlist_id, episode_id)
+    except Exception as exc:
+        payload["history_error"] = f"Episode could not be saved to library: {exc}"
 
     return payload
 
@@ -552,7 +606,7 @@ def _pipeline_generate(report, prepared: list, options: dict, username: str) -> 
 @app.post("/regenerate")
 def regenerate(
     request: Request,
-    episode_id: int = Form(...),
+    episode_id: str = Form(...),
     mode: str = Form("dialogue"),
     length: str = Form("standard"),
     tone: str = Form("conversational"),
@@ -560,10 +614,7 @@ def regenerate(
     focus: str = Form(""),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
-    """Re-run script generation + TTS for a saved episode WITHOUT re-uploading.
-
-    Reuses the stored enriched source text (no re-parse) with the new options.
-    """
+    """Re-run script generation + TTS for a saved episode WITHOUT re-uploading."""
     client_ip = _client_ip(request)
     _check_throttle(client_ip)
 
@@ -574,7 +625,7 @@ def regenerate(
             raise HTTPException(status_code=404, detail="Episode not found.")
         raise HTTPException(
             status_code=410,
-            detail="This episode has no stored source text (generated before v2.1) — re-upload the document.",
+            detail="This episode has no stored source text — re-upload the document.",
         )
 
     options = {
@@ -590,7 +641,7 @@ def regenerate(
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
 
-def _pipeline_regenerate(report, episode_id: int, source: str, options: dict, username: str) -> dict:
+def _pipeline_regenerate(report, episode_id: str, source: str, options: dict, username: str) -> dict:
     report("script", 40)
     try:
         script, provider_used = generate_script_with_provider(source, None, options)
@@ -607,8 +658,9 @@ def _pipeline_regenerate(report, episode_id: int, source: str, options: dict, us
     audio_base64: Optional[str] = None
     audio_engine: Optional[str] = None
     audio_mime: Optional[str] = None
+    transcript_segments: list = []
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
@@ -617,7 +669,7 @@ def _pipeline_regenerate(report, episode_id: int, source: str, options: dict, us
 
     report("saving", 95)
     try:
-        update_episode_script(username, episode_id, script, audio_base64, audio_engine, audio_mime)
+        update_episode_script(username, episode_id, script, audio_base64, audio_engine, audio_mime, transcript_segments)
     except Exception as exc:
         audio_error = audio_error or f"Episode update failed: {exc}"
 
@@ -626,6 +678,7 @@ def _pipeline_regenerate(report, episode_id: int, source: str, options: dict, us
         "audio_base64": audio_base64,
         "audio_engine": audio_engine,
         "audio_mime": audio_mime,
+        "transcript_segments": transcript_segments,
         "provider": provider_used,
         "options": options,
         "episode_id": episode_id,
@@ -642,11 +695,7 @@ def resynthesize(
     payload_in: ResynthesizeRequest,
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
-    """Take an edited script and produce fresh audio (no LLM call, no re-parse).
-
-    This is the "edit the script, keep the show" path: users fix names, tweak
-    wording, then re-synthesize audio directly from the edited text.
-    """
+    """Take an edited script and produce fresh audio (no LLM call, no re-parse)."""
     client_ip = _client_ip(request)
     _check_throttle(client_ip)
 
@@ -664,7 +713,7 @@ def resynthesize(
 def _pipeline_resynthesize(report, script: str) -> dict:
     report("synthesizing", 60)
     try:
-        audio_bytes, audio_engine, audio_mime = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -675,9 +724,141 @@ def _pipeline_resynthesize(report, script: str) -> dict:
         "audio_base64": audio_base64,
         "audio_engine": audio_engine,
         "audio_mime": audio_mime,
+        "transcript_segments": transcript_segments,
     }
 
 
+# ---------------------------------------------------------------------------
+# Batch Mode / Playlists (Feature 6)
+# ---------------------------------------------------------------------------
+@app.post("/batch-generate")
+async def batch_generate(
+    request: Request,
+    files: Optional[List[UploadFile]] = File(None),
+    urls: Optional[str] = Form(None),
+    playlist_title: str = Form("Untitled Series"),
+    description: str = Form(""),
+    mode: str = Form("dialogue"),
+    length: str = Form("standard"),
+    tone: str = Form("conversational"),
+    audience: str = Form("general"),
+    focus: str = Form(""),
+    current_user: str = Depends(_require_user),
+) -> JSONResponse:
+    client_ip = _client_ip(request)
+    _check_throttle(client_ip)
+
+    parsed_items = []
+    if files:
+        for upload in files:
+            filename = (upload.filename or "").strip()
+            ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if ext not in SUPPORTED_EXTENSIONS:
+                continue
+            file_bytes = await upload.read()
+            if file_bytes and len(file_bytes) <= MAX_FILE_BYTES:
+                parsed_items.append(("file", filename, file_bytes))
+
+    if urls:
+        raw_urls = []
+        try:
+            val = json.loads(urls)
+            if isinstance(val, list):
+                raw_urls = [str(u).strip() for u in val if str(u).strip()]
+        except Exception:
+            raw_urls = [u.strip() for u in re.split(r"[\n,]+", urls) if u.strip()]
+        for u in raw_urls:
+            parsed_items.append(("url", u, u))
+
+    if not parsed_items:
+        raise HTTPException(status_code=400, detail="Provide at least one document or URL for the batch queue.")
+    if len(parsed_items) > 15:
+        raise HTTPException(status_code=400, detail="Batch queue is limited to 15 items at a time.")
+
+    options = {
+        "mode": mode if mode in {"dialogue", "solo"} else DEFAULT_OPTIONS["mode"],
+        "length": length if length in {"brief", "standard", "deep"} else DEFAULT_OPTIONS["length"],
+        "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
+        "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
+        "focus": (focus or "").strip()[:300],
+    }
+
+    job_id = _new_job("batch-generate")
+    _run_job(job_id, lambda report: _pipeline_batch_generate(
+        report, parsed_items, playlist_title, description, options, current_user
+    ))
+    return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
+
+
+def _pipeline_batch_generate(
+    report,
+    items: list,
+    playlist_title: str,
+    description: str,
+    options: dict,
+    username: str,
+) -> dict:
+    total_items = len(items)
+    playlist_id = save_playlist(username, playlist_title, description, episode_ids=[])
+    generated_episodes = []
+
+    for idx, (kind, name, data) in enumerate(items):
+        item_num = idx + 1
+        pct_start = int(idx * 100 / total_items)
+        pct_range = int(100 / total_items)
+
+        def item_report(stage: str, sub_pct: int):
+            scaled = pct_start + int(sub_pct * pct_range / 100)
+            report(f"item {item_num}/{total_items}: {stage}", scaled)
+
+        item_report("parsing", 10)
+        try:
+            if kind == "file":
+                doc = parse_document(data, name)
+                display_name = name
+            else:
+                doc = ingest_url(data)
+                display_name = doc.stats.get("title") or name
+
+            ep_res = _synthesize_and_save(
+                item_report, doc, display_name, options, username, playlist_id=playlist_id, start_pct=25
+            )
+            generated_episodes.append(ep_res)
+        except Exception as exc:
+            print(f"[batch] item {name} failed: {exc}")
+
+    report("done", 100)
+    playlist = get_playlist(username, playlist_id)
+    return {
+        "playlist_id": playlist_id,
+        "playlist": playlist,
+        "episodes_count": len(generated_episodes),
+    }
+
+
+@app.get("/playlists")
+def playlists_list(current_user: str = Depends(_require_user)) -> dict:
+    return {"playlists": list_playlists(current_user)}
+
+
+@app.get("/playlists/{playlist_id}")
+def playlists_get(playlist_id: str, current_user: str = Depends(_require_user)) -> dict:
+    pl = get_playlist(current_user, playlist_id)
+    if pl is None:
+        raise HTTPException(status_code=404, detail="Playlist not found.")
+    return pl
+
+
+@app.delete("/playlists/{playlist_id}")
+def playlists_delete(playlist_id: str, current_user: str = Depends(_require_user)) -> dict:
+    if not delete_playlist(current_user, playlist_id):
+        raise HTTPException(status_code=404, detail="Playlist not found.")
+    return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Episodes & Chat
+# ---------------------------------------------------------------------------
 @app.get("/episodes")
 def episodes_list(
     current_user: str = Depends(_require_user),
@@ -688,7 +869,7 @@ def episodes_list(
 
 
 @app.get("/episodes/{episode_id}")
-def episodes_get(episode_id: int, current_user: str = Depends(_require_user)) -> dict:
+def episodes_get(episode_id: str, current_user: str = Depends(_require_user)) -> dict:
     episode = get_episode(current_user, episode_id)
     if episode is None:
         raise HTTPException(status_code=404, detail="Episode not found.")
@@ -696,29 +877,25 @@ def episodes_get(episode_id: int, current_user: str = Depends(_require_user)) ->
 
 
 @app.delete("/episodes/{episode_id}")
-def episodes_delete(episode_id: int, current_user: str = Depends(_require_user)) -> dict:
+def episodes_delete(episode_id: str, current_user: str = Depends(_require_user)) -> dict:
     if not delete_episode(current_user, episode_id):
         raise HTTPException(status_code=404, detail="Episode not found.")
     return {"deleted": True}
 
 
-# ---------------------------------------------------------------------------
-# Chat with the document (grounded in the episode's stored source text)
-# ---------------------------------------------------------------------------
 class ChatRequest(BaseModel):
     question: str
 
 
 @app.get("/episodes/{episode_id}/chat")
-def chat_history(episode_id: int, current_user: str = Depends(_require_user)) -> dict:
+def chat_history(episode_id: str, current_user: str = Depends(_require_user)) -> dict:
     """Load the saved Q&A thread for one episode."""
-    # Ownership is enforced inside list_chat_messages via the join.
     return {"messages": list_chat_messages(current_user, episode_id)}
 
 
 @app.post("/episodes/{episode_id}/chat")
 def chat_ask(
-    episode_id: int,
+    episode_id: str,
     payload_in: ChatRequest,
     current_user: str = Depends(_require_user),
 ) -> dict:
@@ -736,7 +913,7 @@ def chat_ask(
             raise HTTPException(status_code=404, detail="Episode not found.")
         raise HTTPException(
             status_code=410,
-            detail="This episode has no stored source text (generated before v2.1) — chat needs a fresh generation.",
+            detail="This episode has no stored source text — chat needs a fresh generation.",
         )
 
     try:
@@ -747,19 +924,16 @@ def chat_ask(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Chat failed: {exc}") from exc
 
-    # Persist the turn (best-effort).
     try:
         add_chat_message(current_user, episode_id, "user", question)
         add_chat_message(current_user, episode_id, "assistant", answer)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception:
-        pass  # chat history is a nicety
+        pass
 
     return {"answer": answer}
 
 
 @app.delete("/episodes/{episode_id}/chat")
-def chat_clear(episode_id: int, current_user: str = Depends(_require_user)) -> dict:
+def chat_clear(episode_id: str, current_user: str = Depends(_require_user)) -> dict:
     cleared = clear_chat_messages(current_user, episode_id)
     return {"cleared": cleared}

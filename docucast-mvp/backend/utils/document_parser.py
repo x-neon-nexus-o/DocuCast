@@ -30,7 +30,7 @@ from typing import Optional
 
 from pypdf import PdfReader
 
-from utils.vision import describe_image, ocr_image
+from backend.utils.vision import describe_image, ocr_image
 
 # ---------------------------------------------------------------------------
 # Limits

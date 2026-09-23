@@ -1,29 +1,29 @@
-"""DocuCast TTS engine — multi-voice dialogue synthesis with engine fallback.
+"""DocuCast TTS engine — multi-voice dialogue synthesis with engine fallback and timestamps.
 
-Upgrades over the original single-voice module:
-
+Upgrades:
   * Two-host dialogue: lines prefixed "NOVA:" / "RHYS:" are synthesized with
-    distinct voices and stitched into one audio file — a real conversation,
-    not a monologue.
+    distinct voices and stitched into one audio file.
   * Engine fallback chain (audio can NEVER fail):
         1. Edge-TTS   — neural, free (needs Microsoft endpoint)
         2. gTTS       — free (needs Google endpoint), per-host accents
         3. Piper      — neural, 100% offline (drop .onnx voices in backend/voices/)
-        4. espeak-ng  — 100% offline via the bundled espeakng-loader library,
-                        zero network, zero external binaries. Robotic but
-                        guarantees a podcast always ships with audio.
+        4. espeak-ng  — 100% offline via bundled espeakng-loader library
+  * Per-segment duration tracking (Feature 5: interactive click-to-seek):
+    Generates exact [{speaker, text, start, end}] timeline.
   * Script sanitization: markdown, emoji and stage directions are stripped
     so the narration never reads "asterisk asterisk" aloud.
 
-generate_audio() returns (audio_bytes, engine_name, mime_type).
+generate_audio() returns (audio_bytes, engine_name, mime_type, timeline).
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import re
 import threading
+from typing import Optional
 
 # Speaker → per-engine voice mapping
 EDGE_VOICES = {
@@ -32,7 +32,6 @@ EDGE_VOICES = {
     "_default": "en-US-JennyNeural",
 }
 GTTS_VOICES = {
-    # gTTS has one voice per accent; use different accents to distinguish hosts
     "NOVA": {"lang": "en", "tld": "com"},
     "RHYS": {"lang": "en", "tld": "co.uk"},
     "_default": {"lang": "en", "tld": "com"},
@@ -42,7 +41,6 @@ ESPEAK_VOICES = {
     "RHYS": b"en-gb+m2",
     "_default": b"en-us+f3",
 }
-# Piper: filenames looked up inside VOICES_DIR (any of these that exist)
 PIPER_VOICES = {
     "NOVA": ["en_US-lessac-medium.onnx", "en_US-amy-medium.onnx"],
     "RHYS": ["en_US-ryan-medium.onnx", "en_US-joe-medium.onnx"],
@@ -56,8 +54,6 @@ _SPEAKER_ALIASES = {
     "GUEST": "RHYS", "SAM": "RHYS", "B": "RHYS",
 }
 
-# Generous cap: a "deep" dialogue script is ~60-80 short turns. Beyond this,
-# remaining turns are dropped from audio only — synthesize fewer, longer turns.
 MAX_SEGMENTS = 120
 
 
@@ -111,20 +107,34 @@ def split_dialogue(script: str) -> list[tuple[str, str]]:
     return segments[:MAX_SEGMENTS]
 
 
+def _measure_duration(audio_bytes: bytes, fallback_word_count: int = 0) -> float:
+    """Accurately measure duration in seconds using mutagen with speech-rate fallback."""
+    try:
+        import mutagen
+        f = mutagen.File(io.BytesIO(audio_bytes))
+        if f is not None and getattr(f, "info", None) and getattr(f.info, "length", None):
+            return float(f.info.length)
+    except Exception:
+        pass
+    if fallback_word_count > 0:
+        return max(0.8, round(fallback_word_count / 2.6, 2))
+    return 1.5
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 def generate_audio_bytes(text: str) -> bytes:
     """Backward-compatible single return value."""
-    audio, _engine, _mime = generate_audio(text)
+    audio, _engine, _mime, _timeline = generate_audio(text)
     return audio
 
 
-def generate_audio(script: str) -> tuple[bytes, str, str]:
+def generate_audio(script: str) -> tuple[bytes, str, str, list[dict]]:
     """Synthesize the full script (dialogue-aware).
 
-    Returns (audio_bytes, engine, mime_type). Raises ValueError only if every
-    engine — including the fully-offline ones — fails.
+    Returns (audio_bytes, engine, mime_type, timeline).
+    timeline is a list of {"speaker": str, "text": str, "start": float, "end": float}.
     """
     segments = split_dialogue(script)
     if not segments:
@@ -134,27 +144,31 @@ def generate_audio(script: str) -> tuple[bytes, str, str]:
 
     # Engine 1: Edge-TTS (best quality, distinct neural voices)
     try:
-        return _synthesize_all_edge(segments), "edge-tts", "audio/mpeg"
+        audio, timeline = _synthesize_all_edge(segments)
+        return audio, "edge-tts", "audio/mpeg", timeline
     except Exception as exc:
         errors.append(f"edge-tts: {exc}")
 
     # Engine 2: gTTS (reliable cloud fallback, host accents differ)
     try:
-        return _synthesize_all_gtts(segments), "gtts", "audio/mpeg"
+        audio, timeline = _synthesize_all_gtts(segments)
+        return audio, "gtts", "audio/mpeg", timeline
     except Exception as exc:
         errors.append(f"gtts: {exc}")
 
     # Engine 3: Piper neural TTS — fully offline, if voice models are present
     try:
-        audio = _synthesize_all_piper(segments)
-        if audio:
-            return audio, "piper", "audio/wav"
+        result = _synthesize_all_piper(segments)
+        if result:
+            audio, timeline = result
+            return audio, "piper", "audio/wav", timeline
     except Exception as exc:
         errors.append(f"piper: {exc}")
 
     # Engine 4: espeak-ng via bundled library — fully offline, always available
     try:
-        return _synthesize_all_espeak(segments), "espeak-ng", "audio/wav"
+        audio, timeline = _synthesize_all_espeak(segments)
+        return audio, "espeak-ng", "audio/wav", timeline
     except Exception as exc:
         errors.append(f"espeak-ng: {exc}")
 
@@ -164,14 +178,17 @@ def generate_audio(script: str) -> tuple[bytes, str, str]:
 # ---------------------------------------------------------------------------
 # Edge-TTS
 # ---------------------------------------------------------------------------
-def _synthesize_all_edge(segments: list[tuple[str, str]]) -> bytes:
+def _synthesize_all_edge(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
     return _run_coro_safely(_edge_dialogue(segments))
 
 
-async def _edge_dialogue(segments: list[tuple[str, str]]) -> bytes:
+async def _edge_dialogue(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
     import edge_tts
 
     parts: list[bytes] = []
+    timeline: list[dict] = []
+    current_time = 0.0
+
     for speaker, content in segments:
         voice = EDGE_VOICES.get(speaker, EDGE_VOICES["_default"])
         communicate = edge_tts.Communicate(content, voice)
@@ -181,13 +198,20 @@ async def _edge_dialogue(segments: list[tuple[str, str]]) -> bytes:
                 chunks.append(chunk["data"])
         if not chunks:
             raise ValueError("Edge-TTS produced no audio for a segment.")
-        parts.append(b"".join(chunks))
+        seg_bytes = b"".join(chunks)
+        dur = _measure_duration(seg_bytes, fallback_word_count=len(content.split()))
+        start = round(current_time, 2)
+        end = round(start + dur, 2)
+        timeline.append({"speaker": speaker, "text": content, "start": start, "end": end})
+        current_time = end
+        parts.append(seg_bytes)
+
     if not parts:
         raise ValueError("Edge-TTS produced no audio data.")
-    return b"".join(parts)
+    return b"".join(parts), timeline
 
 
-def _run_coro_safely(coro) -> bytes:
+def _run_coro_safely(coro):
     """Run a coroutine whether or not an event loop is already running."""
     try:
         return asyncio.run(coro)
@@ -204,7 +228,7 @@ def _run_coro_safely(coro) -> bytes:
             asyncio.set_event_loop(loop)
             result["data"] = loop.run_until_complete(coro)
             loop.close()
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             error["exc"] = e
 
     th = threading.Thread(target=_target, daemon=True)
@@ -220,12 +244,14 @@ def _run_coro_safely(coro) -> bytes:
 # ---------------------------------------------------------------------------
 # gTTS fallback
 # ---------------------------------------------------------------------------
-def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> bytes:
+def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
     from io import BytesIO
-
     from gtts import gTTS
 
     parts: list[bytes] = []
+    timeline: list[dict] = []
+    current_time = 0.0
+
     for speaker, content in segments:
         cfg = GTTS_VOICES.get(speaker, GTTS_VOICES["_default"])
         buf = BytesIO()
@@ -233,21 +259,26 @@ def _synthesize_all_gtts(segments: list[tuple[str, str]]) -> bytes:
         data = buf.getvalue()
         if not data:
             raise ValueError("gTTS produced no audio for a segment.")
+        dur = _measure_duration(data, fallback_word_count=len(content.split()))
+        start = round(current_time, 2)
+        end = round(start + dur, 2)
+        timeline.append({"speaker": speaker, "text": content, "start": start, "end": end})
+        current_time = end
         parts.append(data)
+
     if not parts:
         raise ValueError("gTTS produced no audio data.")
-    return b"".join(parts)
+    return b"".join(parts), timeline
 
 
 # ---------------------------------------------------------------------------
-# Piper neural TTS (offline; needs .onnx voices in backend/voices/)
+# Piper neural TTS (offline)
 # ---------------------------------------------------------------------------
 def _find_piper_voice(speaker: str):
     for candidate in PIPER_VOICES.get(speaker, PIPER_VOICES["_default"]):
         path = os.path.join(VOICES_DIR, candidate)
         if os.path.exists(path) and os.path.exists(path + ".json"):
             return path
-    # Any onnx voice at all?
     if os.path.isdir(VOICES_DIR):
         for f in sorted(os.listdir(VOICES_DIR)):
             if f.endswith(".onnx") and os.path.exists(os.path.join(VOICES_DIR, f + ".json")):
@@ -255,7 +286,7 @@ def _find_piper_voice(speaker: str):
     return None
 
 
-def _synthesize_all_piper(segments: list[tuple[str, str]]) -> bytes | None:
+def _synthesize_all_piper(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]] | None:
     if not os.path.isdir(VOICES_DIR):
         return None
     try:
@@ -265,7 +296,10 @@ def _synthesize_all_piper(segments: list[tuple[str, str]]) -> bytes | None:
 
     voices: dict[str, object] = {}
     pcm_parts: list[bytes] = []
+    timeline: list[dict] = []
+    current_time = 0.0
     sample_rate = 22050
+
     for speaker, content in segments:
         model_path = _find_piper_voice(speaker)
         if not model_path:
@@ -273,16 +307,25 @@ def _synthesize_all_piper(segments: list[tuple[str, str]]) -> bytes | None:
         if model_path not in voices:
             voices[model_path] = PiperVoice.load(model_path)
         voice = voices[model_path]
+        seg_pcm = []
         for chunk in voice.synthesize(content):
-            pcm_parts.append(chunk.audio_int16_bytes)
+            seg_pcm.append(chunk.audio_int16_bytes)
             sample_rate = chunk.sample_rate
+        seg_bytes = b"".join(seg_pcm)
+        pcm_parts.append(seg_bytes)
+        dur = len(seg_bytes) / (sample_rate * 2)
+        start = round(current_time, 2)
+        end = round(start + dur, 2)
+        timeline.append({"speaker": speaker, "text": content, "start": start, "end": end})
+        current_time = end
+
     if not pcm_parts:
         return None
-    return _pcm_to_wav(b"".join(pcm_parts), sample_rate)
+    return _pcm_to_wav(b"".join(pcm_parts), sample_rate), timeline
 
 
 # ---------------------------------------------------------------------------
-# espeak-ng offline fallback (bundled shared library — zero network)
+# espeak-ng offline fallback
 # ---------------------------------------------------------------------------
 _ESPEAK_LOCK = threading.Lock()
 _ESPEAK_STATE: dict = {}
@@ -293,12 +336,11 @@ def _espeak_lib():
     if "lib" in _ESPEAK_STATE:
         return _ESPEAK_STATE["lib"], _ESPEAK_STATE["rate"]
     import ctypes
-
     import espeakng_loader
 
     lib = ctypes.CDLL(espeakng_loader.get_library_path())
     data_path = str(espeakng_loader.get_data_path()).encode()
-    rate = lib.espeak_Initialize(2, 0, data_path, 0)  # AUDIO_OUTPUT_SYNCHRONOUS
+    rate = lib.espeak_Initialize(2, 0, data_path, 0)
     if rate <= 0:
         raise ValueError("espeak-ng initialization failed.")
     _ESPEAK_STATE["lib"] = lib
@@ -306,7 +348,7 @@ def _espeak_lib():
     return lib, rate
 
 
-def _synthesize_all_espeak(segments: list[tuple[str, str]]) -> bytes:
+def _synthesize_all_espeak(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
     import ctypes
 
     with _ESPEAK_LOCK:
@@ -322,26 +364,34 @@ def _synthesize_all_espeak(segments: list[tuple[str, str]]) -> bytes:
                 collected.append(ctypes.string_at(wav, num * 2))
             return 0
 
-        cb_ref = CALLBACK(_cb)  # keep a reference alive during synthesis
+        cb_ref = CALLBACK(_cb)
         lib.espeak_SetSynthCallback(cb_ref)
-        # Slightly slower rate reads more naturally for narration
-        lib.espeak_SetParameter(1, 160, 0)  # espeakRATE
+        lib.espeak_SetParameter(1, 160, 0)
 
         silence = b"\x00" * int(rate * 0.35) * 2  # 350 ms pause between turns
         pcm_parts: list[bytes] = []
+        timeline: list[dict] = []
+        current_time = 0.0
+
         for speaker, content in segments:
             lib.espeak_SetVoiceByName(ESPEAK_VOICES.get(speaker, ESPEAK_VOICES["_default"]))
             collected.clear()
             data = content.encode("utf-8")
-            lib.espeak_Synth(data, len(data) + 1, 0, 0, 0, 1, None, None)  # POS_CHARACTER, espeakCHARS_UTF8
+            lib.espeak_Synth(data, len(data) + 1, 0, 0, 0, 1, None, None)
             lib.espeak_Synchronize()
             if collected:
-                pcm_parts.append(b"".join(collected))
+                seg_bytes = b"".join(collected)
+                pcm_parts.append(seg_bytes)
                 pcm_parts.append(silence)
+                dur = len(seg_bytes) / (rate * 2)
+                start = round(current_time, 2)
+                end = round(start + dur, 2)
+                timeline.append({"speaker": speaker, "text": content, "start": start, "end": end})
+                current_time = round(end + 0.35, 2)
 
         if not pcm_parts:
             raise ValueError("espeak-ng produced no audio data.")
-        return _pcm_to_wav(b"".join(pcm_parts), rate)
+        return _pcm_to_wav(b"".join(pcm_parts), rate), timeline
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:

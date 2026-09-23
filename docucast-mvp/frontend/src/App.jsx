@@ -4,6 +4,7 @@ import UploadSection from "./components/UploadSection.jsx";
 import ResultSection from "./components/ResultSection.jsx";
 import HistorySection from "./components/HistorySection.jsx";
 import DashboardSection from "./components/DashboardSection.jsx";
+import PlaylistSection from "./components/PlaylistSection.jsx";
 import HalftoneFlow from "./components/HalftoneFlow.jsx";
 
 const API_URL = import.meta.env.VITE_API_URL || "/api";
@@ -310,35 +311,62 @@ export default function App() {
     return { ok: false, error: "This is taking unusually long — please try again." };
   }, [authToken]);
 
-  const handleGenerate = useCallback(async () => {
-    if (!files.length || retryAfterSeconds > 0) return;
+  const handleGenerate = useCallback(async (params = {}) => {
+    if (retryAfterSeconds > 0) return;
+    const isBatch = !!params.batch;
+    const targetUrl = params.url;
+    const targetFiles = params.files || files;
+
+    if (!isBatch && !targetUrl && (!targetFiles || !targetFiles.length)) return;
+
     setLoading(true);
     setError("");
     setResult(null);
     setJobStage("queued");
     setJobPercent(0);
-    setActiveView("studio");
 
     const formData = new FormData();
-    files.forEach((f) => formData.append("files", f));
     formData.append("mode", studio.mode);
     formData.append("length", studio.length);
     formData.append("tone", studio.tone);
     formData.append("audience", studio.audience);
     formData.append("focus", studio.focus || "");
 
+    let endpoint = `${API_URL}/generate`;
+    if (isBatch) {
+      endpoint = `${API_URL}/batch-generate`;
+      formData.append("playlist_title", params.playlistTitle || "Untitled Series");
+      if (params.description) formData.append("description", params.description);
+      if (params.urls) formData.append("urls", params.urls);
+      if (targetFiles?.length) {
+        targetFiles.forEach((f) => formData.append("files", f));
+      }
+    } else if (targetUrl) {
+      formData.append("url", targetUrl);
+      setActiveView("studio");
+    } else {
+      targetFiles.forEach((f) => formData.append("files", f));
+      setActiveView("studio");
+    }
+
     try {
-      const { data } = await axios.post(`${API_URL}/generate`, formData, {
+      const { data } = await axios.post(endpoint, formData, {
         headers: {
           "Content-Type": "multipart/form-data",
           Authorization: `Bearer ${authToken}`,
         },
-        timeout: 30_000,
+        timeout: 60_000,
       });
       const outcome = await pollJob(data.job_id);
       if (!outcome.ok) throw { response: { data: { detail: outcome.error } } };
-      setResult(outcome.result);
-      setHistoryRefreshKey((k) => k + 1); // new episode saved — refresh history
+      
+      if (isBatch) {
+        setActiveView("playlists");
+        setHistoryRefreshKey((k) => k + 1);
+      } else {
+        setResult(outcome.result);
+        setHistoryRefreshKey((k) => k + 1);
+      }
     } catch (err) {
       const message =
         err?.response?.data?.detail ||
@@ -598,11 +626,12 @@ export default function App() {
                 <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-aurora-teal animate-pulse-soft align-middle" aria-hidden="true" />
                 {authUser?.username || "signed in"}
               </span>
-              {/* Dashboard / Studio view switch */}
+              {/* Dashboard / Studio / Playlists view switch */}
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/25 p-1" role="tablist" aria-label="Main views">
                 {[
                   { key: "dashboard", label: "Dashboard", glyph: "◫" },
                   { key: "studio", label: "Studio", glyph: "◉" },
+                  { key: "playlists", label: "Playlists", glyph: "📚" },
                 ].map((tab) => (
                   <button
                     key={tab.key}
@@ -673,6 +702,13 @@ export default function App() {
             onActivate={handleDashboardActivate}
             onOpenEpisode={openEpisodeById}
           />
+        ) : activeView === "playlists" ? (
+          /* ---------------- Playlists ---------------- */
+          <PlaylistSection
+            authToken={authToken}
+            onOpenEpisode={openEpisodeById}
+            refreshKey={historyRefreshKey}
+          />
         ) : (
           /* ---------------- Studio ---------------- */
           <>
@@ -680,7 +716,7 @@ export default function App() {
         <section className="pt-14 sm:pt-20 pb-10 sm:pb-14 text-center">
           <Reveal>
             <p className="text-[11px] font-semibold uppercase tracking-[0.4em] text-aurora-cyan">
-              PDF · PPTX · DOCX · Markdown · Text
+              PDF · PPTX · DOCX · Markdown · Text · YouTube & URLs
             </p>
           </Reveal>
           <Reveal delay={90}>
@@ -692,8 +728,8 @@ export default function App() {
           </Reveal>
           <Reveal delay={180}>
             <p className="mx-auto mt-6 max-w-2xl text-base sm:text-lg text-dim leading-relaxed">
-              DocuCast reads the whole document — body text, tables, graphs, images,
-              even handwritten notes — and hands it to two hosts who actually talk about it.
+              DocuCast reads the whole document or link — body text, tables, graphs, images,
+              YouTube transcripts, and notes — and hands it to two hosts who actually talk about it.
             </p>
           </Reveal>
         </section>
@@ -712,6 +748,7 @@ export default function App() {
               stageCount={100}
               elapsedSeconds={elapsedSeconds}
               retryAfterSeconds={retryAfterSeconds}
+              authToken={authToken}
             />
           </Reveal>
 

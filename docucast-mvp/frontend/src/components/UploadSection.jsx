@@ -1,5 +1,7 @@
 import { useCallback, useRef, useState } from "react";
+import axios from "axios";
 
+const API_URL = import.meta.env.VITE_API_URL || "/api";
 const ACCEPTED_EXTENSIONS = [".pdf", ".pptx", ".docx", ".md", ".markdown", ".txt"];
 const MAX_SIZE_MB = 20;
 const MAX_FILES = 5;
@@ -53,7 +55,6 @@ const STUDIO_GROUPS = [
   },
 ];
 
-// One-tap focus presets — clicking sets the text; clicking the active one clears.
 const FOCUS_PRESETS = [
   { label: "Key results", text: "spend most time on the key results and what they mean" },
   { label: "Limitations", text: "focus on limitations, caveats and open questions" },
@@ -64,6 +65,10 @@ const FOCUS_PRESETS = [
 function extOf(name = "") {
   const parts = name.toLowerCase().split(".");
   return parts.length > 1 ? parts.pop() : "";
+}
+
+function isYoutubeUrl(url = "") {
+  return /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)/i.test(url.trim());
 }
 
 export default function UploadSection({
@@ -78,12 +83,25 @@ export default function UploadSection({
   stageCount = 1,
   elapsedSeconds = 0,
   retryAfterSeconds = 0,
+  authToken,
 }) {
   const inputRef = useRef(null);
+  const [sourceMode, setSourceMode] = useState("files"); // "files" | "url" | "batch"
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState("");
   const [showTuning, setShowTuning] = useState(false);
-  const [lastAccepted, setLastAccepted] = useState(null); // name of last accepted file, for the ✓ flash
+  const [lastAccepted, setLastAccepted] = useState(null);
+
+  // URL state
+  const [inputUrl, setInputUrl] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewData, setPreviewData] = useState(null);
+  const [previewError, setPreviewError] = useState("");
+
+  // Batch / Playlist state
+  const [batchTitle, setBatchTitle] = useState("");
+  const [batchDesc, setBatchDesc] = useState("");
+  const [batchUrls, setBatchUrls] = useState("");
 
   const acceptFile = useCallback(
     (candidate) => {
@@ -92,7 +110,6 @@ export default function UploadSection({
         setFiles([]);
         return false;
       }
-      // Multiple documents: validate each, replace the set with the new selection.
       const incoming = Array.isArray(candidate) ? candidate : [candidate];
       const accepted = [];
       for (const c of incoming) {
@@ -119,9 +136,10 @@ export default function UploadSection({
         }
         accepted.push(c);
       }
-      const combined = accepted.slice(0, MAX_FILES);
-      if (accepted.length > MAX_FILES) {
-        setFileError(`At most ${MAX_FILES} documents per episode — keeping the first ${MAX_FILES}.`);
+      const maxCount = sourceMode === "batch" ? 15 : MAX_FILES;
+      const combined = accepted.slice(0, maxCount);
+      if (accepted.length > maxCount) {
+        setFileError(`At most ${maxCount} documents — keeping the first ${maxCount}.`);
       }
       if (combined.length) {
         setFiles(combined);
@@ -131,7 +149,7 @@ export default function UploadSection({
       if (!fileError) setFileError("No usable file was selected.");
       return false;
     },
-    [setFiles, fileError],
+    [setFiles, fileError, sourceMode],
   );
 
   const removeFile = (name) => {
@@ -150,120 +168,369 @@ export default function UploadSection({
     acceptFile(e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : null);
   };
 
-  const canGenerate = files.length > 0 && !loading && retryAfterSeconds === 0;
+  // Preview URL content
+  const handlePreviewUrl = async () => {
+    const trimmed = inputUrl.trim();
+    if (!trimmed || trimmed.length < 5) return;
+    setPreviewLoading(true);
+    setPreviewError("");
+    setPreviewData(null);
+    try {
+      const { data } = await axios.post(
+        `${API_URL}/ingest-preview`,
+        { url: trimmed },
+        { headers: { Authorization: `Bearer ${authToken}` }, timeout: 20_000 }
+      );
+      setPreviewData(data);
+    } catch (err) {
+      setPreviewError(err?.response?.data?.detail || "Could not preview this URL.");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Submission handler
+  const handleGenerateClick = () => {
+    if (sourceMode === "url") {
+      onGenerate({ url: inputUrl.trim() });
+    } else if (sourceMode === "batch") {
+      onGenerate({
+        batch: true,
+        files,
+        urls: batchUrls.trim(),
+        playlistTitle: batchTitle.trim() || "Untitled Series",
+        description: batchDesc.trim(),
+      });
+    } else {
+      onGenerate({ files });
+    }
+  };
+
+  const canGenerate =
+    !loading &&
+    retryAfterSeconds === 0 &&
+    (sourceMode === "files"
+      ? files.length > 0
+      : sourceMode === "url"
+      ? inputUrl.trim().length > 6
+      : files.length > 0 || batchUrls.trim().length > 6);
+
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
   const elapsedLabel = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
 
   return (
     <section aria-label="Create a podcast" className="glass rounded-[1.75rem] p-5 sm:p-7 shadow-glass">
-      {/* Dropzone */}
-      <div
-        role="button"
-        tabIndex={0}
-        aria-label={files.length ? `${files.length} document${files.length > 1 ? "s" : ""} selected. Activate to choose others.` : "Choose or drop up to 5 documents"}
-        onClick={() => !loading && inputRef.current?.click()}
-        onKeyDown={(e) => {
-          if ((e.key === "Enter" || e.key === " ") && !loading) {
-            e.preventDefault();
-            inputRef.current?.click();
-          }
-        }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          if (!loading) setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={handleDrop}
-        className={`group relative flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 sm:py-12 text-center transition-all duration-300 cursor-pointer select-none
-          ${dragging
-            ? "border-aurora-cyan/80 bg-aurora-cyan/5 shadow-glow-cyan scale-[1.01]"
-            : "border-white/15 hover:border-aurora-violet/50 hover:bg-white/[0.03]"}
-          ${loading ? "opacity-50 pointer-events-none" : ""}`}
-      >
-        {files.length ? (
-          <>
-            <span className="text-3xl text-aurora-violet animate-pulse-soft" aria-hidden="true">
-              {files.length === 1 ? (FILE_META[extOf(files[0].name)]?.glyph || "◰") : "◫"}
-            </span>
-            <div className="w-full max-w-2xl">
-              <p className="font-display text-base font-semibold text-ink">
-                {files.length === 1
-                  ? files[0].name
-                  : `${files.length} sources — one episode`}
-                <span className="ml-2 text-xs font-normal text-dim">
-                  {(totalBytes / (1024 * 1024)).toFixed(2)} MB · click or drop to replace
-                </span>
-              </p>
-              {/* Source chips: one per document, removable */}
-              <div className="mt-2.5 flex flex-wrap justify-center gap-2">
-                {files.map((f) => {
-                  const meta = FILE_META[extOf(f.name)];
-                  return (
-                    <span
-                      key={f.name + f.size}
-                      className={`source-chip group/chip ${lastAccepted === f.name ? "source-chip--new" : ""}`}
-                      title={`${(f.size / 1024).toFixed(0)} KB`}
-                    >
-                      <span className={`mr-1 ${meta?.tint || "text-aurora-violet"}`} aria-hidden="true">
-                        {meta?.glyph || "◰"}
-                      </span>
-                      <span className="max-w-[12rem] truncate">{f.name}</span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation(); // don't open the file picker
-                          removeFile(f.name);
-                        }}
-                        aria-label={`Remove ${f.name}`}
-                        className="ml-1.5 rounded-full px-1 text-dim opacity-60 transition-all hover:text-red-300 hover:opacity-100"
-                      >
-                        ✕
-                      </button>
-                    </span>
-                  );
-                })}
-              </div>
-              {files.length > 1 && (
-                <p className="mt-2 text-[11px] text-faint">
-                  The hosts will compare and connect all {files.length} documents in one episode.
-                </p>
-              )}
-            </div>
-          </>
-        ) : (
-          <>
-            <span
-              className="text-4xl text-aurora-violet transition-transform duration-300 group-hover:-translate-y-1"
-              aria-hidden="true"
-            >
-              ⇪
-            </span>
-            <div>
-              <p className="font-display text-lg font-semibold text-ink">
-                Drop {MAX_FILES > 1 ? "documents" : "a document"}, or <span className="text-aurora">browse</span>
-                {MAX_FILES > 1 && (
-                  <span className="ml-2 text-xs font-normal text-dim">up to {MAX_FILES} — mixed & matched</span>
-                )}
-              </p>
-              <p className="mt-1.5 text-xs text-dim">
-                PDF · PPTX · DOCX · Markdown · TXT — up to {MAX_SIZE_MB} MB each
-              </p>
-            </div>
-          </>
-        )}
+      {/* Mode Switcher */}
+      <div className="flex flex-wrap items-center gap-2 p-1 rounded-2xl bg-black/30 border border-white/10 mb-6 w-fit">
+        <button
+          type="button"
+          onClick={() => {
+            setSourceMode("files");
+            setFileError("");
+          }}
+          className={`rounded-xl px-4 py-2 text-xs font-semibold transition-all ${
+            sourceMode === "files"
+              ? "bg-aurora-violet/30 border border-aurora-violet/60 text-white shadow-glow"
+              : "text-dim hover:text-ink border border-transparent"
+          }`}
+        >
+          📁 Document File
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setSourceMode("url");
+            setFileError("");
+          }}
+          className={`rounded-xl px-4 py-2 text-xs font-semibold transition-all ${
+            sourceMode === "url"
+              ? "bg-aurora-cyan/30 border border-aurora-cyan/60 text-white shadow-glow"
+              : "text-dim hover:text-ink border border-transparent"
+          }`}
+        >
+          🔗 Link / YouTube
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setSourceMode("batch");
+            setFileError("");
+          }}
+          className={`rounded-xl px-4 py-2 text-xs font-semibold transition-all ${
+            sourceMode === "batch"
+              ? "bg-aurora-teal/30 border border-aurora-teal/60 text-white shadow-glow"
+              : "text-dim hover:text-ink border border-transparent"
+          }`}
+        >
+          📚 Batch Series / Playlist
+        </button>
       </div>
 
-      <input
-        ref={inputRef}
-        type="file"
-        multiple
-        accept=".pdf,.pptx,.docx,.md,.markdown,.txt,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain"
-        onChange={handleChange}
-        className="hidden"
-        disabled={loading}
-        aria-hidden="true"
-        tabIndex={-1}
-      />
+      {/* Mode 1: Document Dropzone */}
+      {sourceMode === "files" && (
+        <>
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label={
+              files.length
+                ? `${files.length} document${files.length > 1 ? "s" : ""} selected. Activate to choose others.`
+                : "Choose or drop up to 5 documents"
+            }
+            onClick={() => !loading && inputRef.current?.click()}
+            onKeyDown={(e) => {
+              if ((e.key === "Enter" || e.key === " ") && !loading) {
+                e.preventDefault();
+                inputRef.current?.click();
+              }
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!loading) setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+            className={`group relative flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-10 sm:py-12 text-center transition-all duration-300 cursor-pointer select-none
+              ${
+                dragging
+                  ? "border-aurora-cyan/80 bg-aurora-cyan/5 shadow-glow-cyan scale-[1.01]"
+                  : "border-white/15 hover:border-aurora-violet/50 hover:bg-white/[0.03]"
+              }
+              ${loading ? "opacity-50 pointer-events-none" : ""}`}
+          >
+            {files.length ? (
+              <>
+                <span className="text-3xl text-aurora-violet animate-pulse-soft" aria-hidden="true">
+                  {files.length === 1 ? FILE_META[extOf(files[0].name)]?.glyph || "◰" : "◫"}
+                </span>
+                <div className="w-full max-w-2xl">
+                  <p className="font-display text-base font-semibold text-ink">
+                    {files.length === 1 ? files[0].name : `${files.length} sources — one episode`}
+                    <span className="ml-2 text-xs font-normal text-dim">
+                      {(totalBytes / (1024 * 1024)).toFixed(2)} MB · click or drop to replace
+                    </span>
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap justify-center gap-2">
+                    {files.map((f) => {
+                      const meta = FILE_META[extOf(f.name)];
+                      return (
+                        <span
+                          key={f.name + f.size}
+                          className={`source-chip group/chip ${lastAccepted === f.name ? "source-chip--new" : ""}`}
+                          title={`${(f.size / 1024).toFixed(0)} KB`}
+                        >
+                          <span className={`mr-1 ${meta?.tint || "text-aurora-violet"}`} aria-hidden="true">
+                            {meta?.glyph || "◰"}
+                          </span>
+                          <span className="max-w-[12rem] truncate">{f.name}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeFile(f.name);
+                            }}
+                            aria-label={`Remove ${f.name}`}
+                            className="ml-1.5 rounded-full px-1 text-dim opacity-60 transition-all hover:text-red-300 hover:opacity-100"
+                          >
+                            ✕
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                  {files.length > 1 && (
+                    <p className="mt-2 text-[11px] text-faint">
+                      The hosts will compare and connect all {files.length} documents in one episode.
+                    </p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <span
+                  className="text-4xl text-aurora-violet transition-transform duration-300 group-hover:-translate-y-1"
+                  aria-hidden="true"
+                >
+                  ⇪
+                </span>
+                <div>
+                  <p className="font-display text-lg font-semibold text-ink">
+                    Drop {MAX_FILES > 1 ? "documents" : "a document"}, or <span className="text-aurora">browse</span>
+                    {MAX_FILES > 1 && (
+                      <span className="ml-2 text-xs font-normal text-dim">up to {MAX_FILES} — mixed & matched</span>
+                    )}
+                  </p>
+                  <p className="mt-1.5 text-xs text-dim">
+                    PDF · PPTX · DOCX · Markdown · TXT — up to {MAX_SIZE_MB} MB each
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            accept=".pdf,.pptx,.docx,.md,.markdown,.txt,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain"
+            onChange={handleChange}
+            className="hidden"
+            disabled={loading}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+        </>
+      )}
+
+      {/* Mode 2: Link / YouTube Ingestion */}
+      {sourceMode === "url" && (
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-5 sm:p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-widest text-dim mb-2">
+              Article or YouTube URL
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="url"
+                value={inputUrl}
+                onChange={(e) => {
+                  setInputUrl(e.target.value);
+                  setPreviewData(null);
+                  setPreviewError("");
+                }}
+                placeholder="https://www.youtube.com/watch?v=... or https://example.com/article"
+                className="flex-1 rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-cyan/60"
+              />
+              <button
+                type="button"
+                onClick={handlePreviewUrl}
+                disabled={previewLoading || inputUrl.trim().length < 6}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-xs font-semibold text-dim hover:text-ink hover:border-aurora-cyan/50 disabled:opacity-40"
+              >
+                {previewLoading ? "Inspecting…" : "Preview link"}
+              </button>
+            </div>
+          </div>
+
+          {inputUrl.trim().length > 6 && (
+            <div className="flex items-center gap-2">
+              {isYoutubeUrl(inputUrl) ? (
+                <span className="rounded-full border border-red-400/40 bg-red-500/10 px-3 py-1 text-[11px] font-semibold text-red-200 flex items-center gap-1.5">
+                  <span>▶</span> YouTube Video (transcripts will be extracted automatically via yt-dlp)
+                </span>
+              ) : (
+                <span className="rounded-full border border-aurora-cyan/40 bg-aurora-cyan/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 flex items-center gap-1.5">
+                  <span>🌐</span> Web Article (content & data tables will be scraped)
+                </span>
+              )}
+            </div>
+          )}
+
+          {previewError && (
+            <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-2.5 text-xs text-red-200">
+              {previewError}
+            </div>
+          )}
+
+          {previewData && (
+            <div className="rounded-xl border border-aurora-cyan/30 bg-aurora-cyan/5 p-4 text-xs animate-fade-in space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-ink text-sm truncate">{previewData.title}</span>
+                <span className="uppercase text-[10px] px-2 py-0.5 rounded-full border border-aurora-cyan/40 text-cyan-200">
+                  {previewData.doc_type}
+                </span>
+              </div>
+              <p className="text-dim line-clamp-3 leading-relaxed font-mono text-[11px]">
+                {previewData.preview_text}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mode 3: Batch Series & Playlists */}
+      {sourceMode === "batch" && (
+        <div className="rounded-2xl border border-white/10 bg-black/25 p-5 sm:p-6 space-y-5">
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-widest text-dim mb-1.5">
+              Series / Playlist Title
+            </label>
+            <input
+              type="text"
+              value={batchTitle}
+              onChange={(e) => setBatchTitle(e.target.value)}
+              placeholder="e.g. CS50 Computer Science Lecture Series"
+              className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-2.5 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-teal/60"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-widest text-dim mb-1.5">
+              Description <span className="normal-case font-normal">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={batchDesc}
+              onChange={(e) => setBatchDesc(e.target.value)}
+              placeholder="e.g. Weekly chapters converted into bite-sized conversational episodes"
+              className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-2 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-teal/60"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-widest text-dim mb-1.5">
+              Paste Links <span className="normal-case font-normal">(one YouTube URL or article link per line)</span>
+            </label>
+            <textarea
+              rows={3}
+              value={batchUrls}
+              onChange={(e) => setBatchUrls(e.target.value)}
+              placeholder={"https://www.youtube.com/watch?v=...\nhttps://example.com/lecture-2\nhttps://example.com/lecture-3"}
+              className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-2.5 text-xs font-mono text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-teal/60"
+            />
+          </div>
+
+          {/* Plus optional document files */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold uppercase tracking-widest text-dim">
+                Attach Document Files (optional, up to 15)
+              </span>
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="text-xs text-aurora-teal hover:underline font-semibold"
+              >
+                + Add files
+              </button>
+            </div>
+            {files.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {files.map((f) => (
+                  <span key={f.name} className="source-chip">
+                    <span className="max-w-[10rem] truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(f.name)}
+                      className="ml-1 text-dim hover:text-red-300"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <input
+              ref={inputRef}
+              type="file"
+              multiple
+              accept=".pdf,.pptx,.docx,.md,.markdown,.txt"
+              onChange={handleChange}
+              className="hidden"
+            />
+          </div>
+        </div>
+      )}
 
       {fileError && (
         <p role="alert" className="mt-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-2.5 text-xs text-amber-200">
@@ -307,9 +574,11 @@ export default function UploadSection({
                         title={opt.hint}
                         onClick={() => setStudio((s) => ({ ...s, [group.key]: opt.value }))}
                         className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all duration-200
-                          ${active
-                            ? "bg-aurora-violet/25 text-white border border-aurora-violet/60 shadow-glow"
-                            : "border border-white/10 bg-white/[0.03] text-dim hover:text-ink hover:border-white/25"}`}
+                          ${
+                            active
+                              ? "bg-aurora-violet/25 text-white border border-aurora-violet/60 shadow-glow"
+                              : "border border-white/10 bg-white/[0.03] text-dim hover:text-ink hover:border-white/25"
+                          }`}
                       >
                         {opt.label}
                         {opt.hint && active && <span className="ml-1.5 font-normal opacity-70">{opt.hint}</span>}
@@ -341,15 +610,16 @@ export default function UploadSection({
                       type="button"
                       aria-pressed={active}
                       title={active ? "Click again to clear" : preset.text}
-                      onClick={() =>
-                        setStudio((s) => ({ ...s, focus: active ? "" : preset.text }))
-                      }
+                      onClick={() => setStudio((s) => ({ ...s, focus: active ? "" : preset.text }))}
                       className={`rounded-full px-3 py-1 text-[11px] font-semibold transition-all duration-200 border
-                        ${active
-                          ? "bg-aurora-cyan/20 text-cyan-200 border-aurora-cyan/50"
-                          : "border-white/10 bg-white/[0.03] text-dim hover:text-ink hover:border-white/25"}`}
+                        ${
+                          active
+                            ? "bg-aurora-cyan/20 text-cyan-200 border-aurora-cyan/50"
+                            : "border-white/10 bg-white/[0.03] text-dim hover:text-ink hover:border-white/25"
+                        }`}
                     >
-                      {active ? "✓ " : "+ "}{preset.label}
+                      {active ? "✓ " : "+ "}
+                      {preset.label}
                     </button>
                   );
                 })}
@@ -359,18 +629,18 @@ export default function UploadSection({
         )}
       </div>
 
-      {/* Generate */}
+      {/* Generate Button */}
       <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
         <button
           type="button"
-          onClick={onGenerate}
+          onClick={handleGenerateClick}
           disabled={!canGenerate}
           className="btn-aurora flex-1 inline-flex items-center justify-center gap-2.5 rounded-xl px-6 py-4 text-sm font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
         >
           {loading ? (
             <>
               <Spinner />
-              Producing your episode…
+              {sourceMode === "batch" ? "Generating batch playlist…" : "Producing your episode…"}
             </>
           ) : retryAfterSeconds > 0 ? (
             <>
@@ -380,11 +650,15 @@ export default function UploadSection({
           ) : (
             <>
               <span aria-hidden="true">◉</span>
-              Generate podcast
+              {sourceMode === "batch"
+                ? "Generate batch playlist"
+                : sourceMode === "url"
+                ? "Generate from URL"
+                : "Generate podcast"}
             </>
           )}
         </button>
-        {!loading && files.length > 0 && (
+        {!loading && files.length > 0 && sourceMode === "files" && (
           <button
             type="button"
             onClick={() => setFiles([])}
@@ -395,7 +669,7 @@ export default function UploadSection({
         )}
       </div>
 
-      {/* Progress */}
+      {/* Progress display */}
       {loading && (
         <div
           className="mt-5 rounded-xl border border-white/10 bg-black/25 px-5 py-4 animate-fade-in"
@@ -413,7 +687,9 @@ export default function UploadSection({
                 {loadingMessage} <span className="tabular-nums text-dim font-normal">· {elapsedLabel}</span>
               </p>
               <p className="mt-0.5 text-xs text-dim">
-                Longer documents and deep dives can take a couple of minutes.
+                {sourceMode === "batch"
+                  ? "Processing multiple items in queue — synthesizing voices and building playlist."
+                  : "Parsing content, writing script, and synthesizing voices."}
               </p>
             </div>
           </div>

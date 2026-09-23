@@ -20,3 +20,6 @@ espeakng-loader
 # Optional: neural offline voices — drop .onnx models into backend/voices/
 piper-tts
 python-docx
+pymongo>=4.0.0
+mutagen>=1.46.0
+

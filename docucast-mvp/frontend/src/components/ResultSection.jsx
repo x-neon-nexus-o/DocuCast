@@ -163,7 +163,7 @@ function WaveformSeek({ audioSrc, duration, current, playing, onSeek }) {
   );
 }
 
-function Player({ src, downloadName, engineLabel }) {
+function Player({ src, downloadName, engineLabel, onTimeUpdate, seekTime, onSeekHandled }) {
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -171,9 +171,21 @@ function Player({ src, downloadName, engineLabel }) {
   const [rate, setRate] = useState(1);
 
   useEffect(() => {
+    if (seekTime != null && audioRef.current) {
+      audioRef.current.currentTime = seekTime;
+      audioRef.current.play().catch(() => {});
+      setPlaying(true);
+      onSeekHandled?.();
+    }
+  }, [seekTime, onSeekHandled]);
+
+  useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return undefined;
-    const onTime = () => setCurrent(audio.currentTime);
+    const onTime = () => {
+      setCurrent(audio.currentTime);
+      onTimeUpdate?.(audio.currentTime);
+    };
     const onMeta = () => setDuration(audio.duration || 0);
     const onEnd = () => setPlaying(false);
     audio.addEventListener("timeupdate", onTime);
@@ -186,7 +198,7 @@ function Player({ src, downloadName, engineLabel }) {
       audio.removeEventListener("durationchange", onMeta);
       audio.removeEventListener("ended", onEnd);
     };
-  }, [src]);
+  }, [src, onTimeUpdate]);
 
   const toggle = () => {
     const audio = audioRef.current;
@@ -594,6 +606,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
     audio_engine: audioEngine,
     audio_error: audioError,
     audio_note: audioNote,
+    transcript_segments: transcriptSegments,
     provider,
     provider_note: providerNote,
     analysis,
@@ -606,6 +619,10 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
   const [openSection, setOpenSection] = useState("");
   const [showEditor, setShowEditor] = useState(false);
   const [editedScript, setEditedScript] = useState("");
+  const [currentTime, setCurrentTime] = useState(0);
+  const [seekTime, setSeekTime] = useState(null);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const turnRefs = useRef([]);
 
   // Seed the editor with the current script each time it's opened.
   useEffect(() => {
@@ -623,7 +640,27 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
     return `${base}-docucast.${ext}`;
   }, [audioMime, fileName, result.filename]);
 
-  const { turns, isDialogue } = useMemo(() => parseTranscript(script), [script]);
+  const { turns: parsedTurns, isDialogue } = useMemo(() => parseTranscript(script), [script]);
+  const turns = useMemo(() => {
+    if (transcriptSegments && transcriptSegments.length > 0) {
+      return transcriptSegments;
+    }
+    return parsedTurns;
+  }, [transcriptSegments, parsedTurns]);
+
+  const activeTurnIndex = useMemo(() => {
+    if (!turns.length) return -1;
+    return turns.findIndex(
+      (t) => t.start != null && currentTime >= t.start && currentTime < (t.end != null ? t.end : t.start + 3.5),
+    );
+  }, [turns, currentTime]);
+
+  useEffect(() => {
+    if (autoFollow && activeTurnIndex >= 0 && turnRefs.current[activeTurnIndex]) {
+      turnRefs.current[activeTurnIndex].scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [activeTurnIndex, autoFollow]);
+
   const wordCount = useMemo(() => (script || "").trim().split(/\s+/).length, [script]);
 
   const engineLabel =
@@ -803,7 +840,14 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
 
       {/* Player */}
       {audioSrc ? (
-        <Player src={audioSrc} downloadName={downloadName} engineLabel={engineLabel} />
+        <Player
+          src={audioSrc}
+          downloadName={downloadName}
+          engineLabel={engineLabel}
+          onTimeUpdate={setCurrentTime}
+          seekTime={seekTime}
+          onSeekHandled={() => setSeekTime(null)}
+        />
       ) : (
         <div className="rounded-2xl border border-amber-300/30 bg-amber-400/10 px-5 py-4 text-sm text-amber-100">
           <p className="font-semibold">Audio unavailable</p>
@@ -816,10 +860,27 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
       {/* Transcript */}
       <section aria-labelledby="transcript-heading" className="glass rounded-[1.75rem] p-5 sm:p-7">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 id="transcript-heading" className="font-display text-lg font-semibold">
-            Transcript
-          </h3>
+          <div>
+            <h3 id="transcript-heading" className="font-display text-lg font-semibold">
+              Interactive Transcript
+            </h3>
+            <p className="text-[11px] text-dim mt-0.5">
+              Click any turn or timestamp to jump audio · auto-follows live playback
+            </p>
+          </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setAutoFollow((a) => !a)}
+              className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                autoFollow
+                  ? "border-aurora-teal/50 bg-aurora-teal/15 text-teal-200"
+                  : "border-white/10 bg-white/[0.03] text-dim hover:text-ink"
+              }`}
+              title="Toggle automatic scrolling as audio plays"
+            >
+              {autoFollow ? "✦ Auto-follow ON" : "✧ Auto-follow OFF"}
+            </button>
             {isDialogue && (
               <span className="hidden sm:flex items-center gap-2 text-[11px] text-dim mr-1">
                 <span className="rounded-full border border-aurora-violet/40 bg-aurora-violet/20 px-2.5 py-0.5 font-semibold text-violet-200">Nova</span>
@@ -847,7 +908,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
 
         {/* Intelligence Preview Bar */}
         {analysis && (
-          <div className="flex items-center gap-4 px-4 mb-2 bg-white/[0.02] rounded-xl cursor-pointer hover:bg-white/[0.03] transition-colors"
+          <div className="flex items-center gap-4 px-4 my-3 bg-white/[0.02] rounded-xl cursor-pointer hover:bg-white/[0.03] transition-colors"
              onClick={() => {
                // Determine first available section to open
                let firstSection = "";
@@ -898,22 +959,59 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
           </div>
         )}
 
-        <div className="script-scroll mt-4 max-h-96 overflow-y-auto pr-2">
-          {isDialogue ? (
-            <div className="flex flex-col gap-3">
+        <div className="script-scroll mt-4 max-h-[28rem] overflow-y-auto pr-2 space-y-2">
+          {turns && turns.length > 0 ? (
+            <div className="flex flex-col gap-2.5">
               {turns.map((turn, i) => {
                 const style = SPEAKER_STYLES[turn.speaker] || null;
+                const isActive = i === activeTurnIndex;
+                const hasTime = turn.start != null;
                 return (
-                  <div key={i} className={`flex gap-3 ${turn.speaker === "RHYS" ? "flex-row-reverse text-right" : ""}`}>
-                    {style && (
-                      <span
-                        className={`mt-0.5 h-fit shrink-0 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${style.chip}`}
-                        aria-label={`${style.name} says`}
-                      >
-                        {style.name}
+                  <div
+                    key={i}
+                    ref={(el) => (turnRefs.current[i] = el)}
+                    onClick={() => {
+                      if (hasTime) setSeekTime(turn.start);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && hasTime) setSeekTime(turn.start);
+                    }}
+                    className={`group relative rounded-xl p-3 sm:p-3.5 transition-all duration-300 text-left cursor-pointer border ${
+                      isActive
+                        ? "bg-aurora-violet/25 border-aurora-violet/60 shadow-glow"
+                        : "border-white/5 bg-white/[0.015] hover:bg-white/[0.05] hover:border-white/20"
+                    } ${turn.speaker === "RHYS" ? "ml-auto max-w-[90%]" : "mr-auto max-w-[90%]"}`}
+                  >
+                    <div className="flex items-center justify-between gap-3 mb-1.5">
+                      <div className="flex items-center gap-2">
+                        {style && (
+                          <span
+                            className={`rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${style.chip}`}
+                          >
+                            {style.name}
+                          </span>
+                        )}
+                        {hasTime && (
+                          <span
+                            className={`font-mono text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                              isActive
+                                ? "bg-aurora-cyan/30 border-aurora-cyan/50 text-cyan-100 font-bold"
+                                : "bg-white/5 border-white/10 text-dim group-hover:text-ink group-hover:border-aurora-violet/40"
+                            }`}
+                          >
+                            {isActive ? "▶ " : ""}{formatTime(turn.start)}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] font-semibold text-dim opacity-0 group-hover:opacity-100 transition-opacity">
+                        jump to audio ⇗
                       </span>
-                    )}
-                    <p className="text-sm leading-relaxed text-ink/90">{turn.text}</p>
+                    </div>
+                    <p className={`text-sm leading-relaxed transition-colors ${isActive ? "text-white font-medium" : "text-ink/90"}`}>
+                      {turn.text}
+                    </p>
                   </div>
                 );
               })}
