@@ -46,6 +46,14 @@ export const DEFAULT_STUDIO = {
   tone: "conversational",
   audience: "general",
   focus: "",
+  host_a_name: "NOVA",
+  host_b_name: "RHYS",
+  host_a_voice: "en-US-JennyNeural",
+  host_b_voice: "en-US-GuyNeural",
+  host_a_rate: 0,
+  host_b_rate: 0,
+  host_a_pitch: 0,
+  host_b_pitch: 0,
 };
 
 /* ------------------------------------------------------------------ */
@@ -66,6 +74,12 @@ function loadStudioPrefs() {
       if (allowed.includes(saved[key])) merged[key] = saved[key];
     }
     if (typeof saved.focus === "string") merged.focus = saved.focus.slice(0, 300);
+    for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice"]) {
+      if (typeof saved[key] === "string") merged[key] = saved[key].slice(0, 80);
+    }
+    for (const key of ["host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
+      if (Number.isFinite(Number(saved[key]))) merged[key] = Number(saved[key]);
+    }
     return merged;
   } catch {
     return DEFAULT_STUDIO;
@@ -331,6 +345,10 @@ export default function App() {
     formData.append("tone", studio.tone);
     formData.append("audience", studio.audience);
     formData.append("focus", studio.focus || "");
+    for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
+      formData.append(key, String(studio[key] ?? ""));
+    }
+    if (params.redactedSource) formData.append("redacted_source", params.redactedSource);
 
     let endpoint = `${API_URL}/generate`;
     if (isBatch) {
@@ -402,6 +420,9 @@ export default function App() {
       formData.append("tone", studio.tone);
       formData.append("audience", studio.audience);
       formData.append("focus", studio.focus || "");
+      for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
+        formData.append(key, String(studio[key] ?? ""));
+      }
       const { data } = await axios.post(`${API_URL}/regenerate`, formData, {
         headers: { "Content-Type": "multipart/form-data", Authorization: `Bearer ${authToken}` },
         timeout: 30_000,

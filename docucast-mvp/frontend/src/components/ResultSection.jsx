@@ -613,6 +613,10 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
     episode_id: episodeId,
     show_notes: showNotes,
   } = result;
+  const displayNames = {
+    NOVA: result.options?.host_a_name || "Nova",
+    RHYS: result.options?.host_b_name || "Rhys",
+  };
 
   const [copied, setCopied] = useState(false);
   const [notesCopied, setNotesCopied] = useState(false);
@@ -990,7 +994,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
                           <span
                             className={`rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${style.chip}`}
                           >
-                            {style.name}
+                            {displayNames[turn.speaker] || style.name}
                           </span>
                         )}
                         {hasTime && (

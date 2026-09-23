@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 
 const API_URL = import.meta.env.VITE_API_URL || "/api";
@@ -97,11 +97,42 @@ export default function UploadSection({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewData, setPreviewData] = useState(null);
   const [previewError, setPreviewError] = useState("");
+  const [briefText, setBriefText] = useState("");
+  const [excludedLines, setExcludedLines] = useState(new Set());
+  const [voiceCatalog, setVoiceCatalog] = useState([]);
 
   // Batch / Playlist state
   const [batchTitle, setBatchTitle] = useState("");
   const [batchDesc, setBatchDesc] = useState("");
   const [batchUrls, setBatchUrls] = useState("");
+
+  useEffect(() => {
+    if (!authToken) return undefined;
+    axios.get(`${API_URL}/tts/voices`, { headers: { Authorization: `Bearer ${authToken}` } })
+      .then(({ data }) => setVoiceCatalog(data.voices || []))
+      .catch(() => setVoiceCatalog([]));
+    return undefined;
+  }, [authToken]);
+
+  useEffect(() => {
+    if (sourceMode !== "files" || !files.length || loading) return undefined;
+    const extract = async () => {
+      const data = new FormData();
+      files.forEach((file) => data.append("files", file));
+      try {
+        const response = await axios.post(`${API_URL}/extract-preview`, data, {
+          headers: { Authorization: `Bearer ${authToken}` }, timeout: 30_000,
+        });
+        setBriefText(response.data.source_text || "");
+        setExcludedLines(new Set());
+        setPreviewError("");
+      } catch (err) {
+        setPreviewError(err?.response?.data?.detail || "Could not extract a preview.");
+      }
+    };
+    extract();
+    return undefined;
+  }, [authToken, files, loading, sourceMode]);
 
   const acceptFile = useCallback(
     (candidate) => {
@@ -182,6 +213,8 @@ export default function UploadSection({
         { headers: { Authorization: `Bearer ${authToken}` }, timeout: 20_000 }
       );
       setPreviewData(data);
+      setBriefText(data.source_text || "");
+      setExcludedLines(new Set());
     } catch (err) {
       setPreviewError(err?.response?.data?.detail || "Could not preview this URL.");
     } finally {
@@ -192,7 +225,7 @@ export default function UploadSection({
   // Submission handler
   const handleGenerateClick = () => {
     if (sourceMode === "url") {
-      onGenerate({ url: inputUrl.trim() });
+      onGenerate({ url: inputUrl.trim(), redactedSource: approvedBrief });
     } else if (sourceMode === "batch") {
       onGenerate({
         batch: true,
@@ -202,7 +235,7 @@ export default function UploadSection({
         description: batchDesc.trim(),
       });
     } else {
-      onGenerate({ files });
+      onGenerate({ files, redactedSource: approvedBrief });
     }
   };
 
@@ -217,6 +250,10 @@ export default function UploadSection({
 
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
   const elapsedLabel = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+  const briefLines = briefText.split("\n");
+  const approvedBrief = briefLines.filter((_line, index) => !excludedLines.has(index)).join("\n").trim();
+
+  const updateStudio = (key, value) => setStudio((current) => ({ ...current, [key]: value }));
 
   return (
     <section aria-label="Create a podcast" className="glass rounded-[1.75rem] p-5 sm:p-7 shadow-glass">
@@ -396,6 +433,8 @@ export default function UploadSection({
                 onChange={(e) => {
                   setInputUrl(e.target.value);
                   setPreviewData(null);
+                  setBriefText("");
+                  setExcludedLines(new Set());
                   setPreviewError("");
                 }}
                 placeholder="https://www.youtube.com/watch?v=... or https://example.com/article"
@@ -445,6 +484,41 @@ export default function UploadSection({
               </p>
             </div>
           )}
+        </div>
+      )}
+
+      {briefText && (sourceMode === "files" || previewData) && (
+        <div className="mt-5 rounded-2xl border border-amber-300/25 bg-amber-400/[0.04] p-4 sm:p-5 animate-fade-in">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-widest text-amber-200">Redaction preview</p>
+              <p className="mt-1 text-xs text-dim">Strike any sensitive lines before they reach the script generator.</p>
+            </div>
+            <span className="shrink-0 rounded-full border border-amber-300/25 px-2.5 py-1 text-[10px] text-amber-100">
+              {excludedLines.size} excluded
+            </span>
+          </div>
+          <div className="mt-3 max-h-64 overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-3 space-y-1">
+            {briefLines.map((line, index) => {
+              const excluded = excludedLines.has(index);
+              if (!line.trim()) return <div key={index} className="h-2" />;
+              return (
+                <button
+                  key={`${index}-${line.slice(0, 12)}`}
+                  type="button"
+                  onClick={() => setExcludedLines((current) => {
+                    const next = new Set(current);
+                    if (next.has(index)) next.delete(index); else next.add(index);
+                    return next;
+                  })}
+                  className={`block w-full rounded-lg px-2.5 py-1.5 text-left text-[11px] leading-relaxed transition-colors ${excluded ? "bg-red-500/10 text-red-200 line-through" : "text-dim hover:bg-white/[0.05] hover:text-ink"}`}
+                  title={excluded ? "Restore this line" : "Exclude this line from generation"}
+                >
+                  <span className="mr-2 text-[10px] opacity-50">{excluded ? "×" : "·"}</span>{line}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -625,6 +699,38 @@ export default function UploadSection({
                 })}
               </div>
             </label>
+
+            <fieldset className="rounded-xl border border-aurora-violet/20 bg-aurora-violet/[0.04] p-4">
+              <legend className="px-1 text-[11px] font-semibold uppercase tracking-widest text-aurora-violet">Host voices</legend>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {[["host_a", "Host A"], ["host_b", "Host B"]].map(([prefix, label]) => (
+                  <div key={prefix} className="space-y-2">
+                    <input
+                      value={studio[`${prefix}_name`]}
+                      maxLength={24}
+                      onChange={(e) => updateStudio(`${prefix}_name`, e.target.value)}
+                      aria-label={`${label} name`}
+                      className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-aurora-violet/50"
+                      placeholder={label}
+                    />
+                    <select
+                      value={studio[`${prefix}_voice`]}
+                      onChange={(e) => updateStudio(`${prefix}_voice`, e.target.value)}
+                      aria-label={`${label} voice`}
+                      className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-aurora-violet/50"
+                    >
+                      {(voiceCatalog.length ? voiceCatalog : [{ name: "en-US-JennyNeural", label: "Jenny · US" }, { name: "en-US-GuyNeural", label: "Guy · US" }]).map((voice) => <option key={voice.name} value={voice.name}>{voice.label}</option>)}
+                    </select>
+                    <label className="block text-[11px] text-dim">Speed: {studio[`${prefix}_rate`] > 0 ? "+" : ""}{studio[`${prefix}_rate`]}%
+                      <input type="range" min="-30" max="50" step="5" value={studio[`${prefix}_rate`]} onChange={(e) => updateStudio(`${prefix}_rate`, Number(e.target.value))} className="mt-1 w-full accent-cyan-400" />
+                    </label>
+                    <label className="block text-[11px] text-dim">Pitch: {studio[`${prefix}_pitch`] > 0 ? "+" : ""}{studio[`${prefix}_pitch`]}Hz
+                      <input type="range" min="-12" max="12" step="2" value={studio[`${prefix}_pitch`]} onChange={(e) => updateStudio(`${prefix}_pitch`, Number(e.target.value))} className="mt-1 w-full accent-violet-400" />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </fieldset>
           </div>
         )}
       </div>

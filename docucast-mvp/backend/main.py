@@ -120,6 +120,10 @@ class ResynthesizeRequest(BaseModel):
     script: str
 
 
+class BriefPreviewRequest(BaseModel):
+    url: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Job system — long-running generation runs in a background thread; the client
 # polls /jobs/{id} for REAL stage updates instead of a fake timed sequence.
@@ -342,6 +346,29 @@ def list_providers() -> dict:
     }
 
 
+@app.get("/tts/voices")
+def list_tts_voices(current_user: str = Depends(_require_user)) -> dict:
+    """Return the selectable Edge-TTS neural voices for the studio controls."""
+    return {"voices": [
+        {"name": "en-US-JennyNeural", "label": "Jenny · US"},
+        {"name": "en-US-GuyNeural", "label": "Guy · US"},
+        {"name": "en-US-AriaNeural", "label": "Aria · US"},
+        {"name": "en-US-DavisNeural", "label": "Davis · US"},
+        {"name": "en-US-ChristopherNeural", "label": "Christopher · US"},
+        {"name": "en-US-EricNeural", "label": "Eric · US"},
+        {"name": "en-US-MichelleNeural", "label": "Michelle · US"},
+        {"name": "en-US-RogerNeural", "label": "Roger · US"},
+        {"name": "en-GB-SoniaNeural", "label": "Sonia · UK"},
+        {"name": "en-GB-RyanNeural", "label": "Ryan · UK"},
+        {"name": "en-AU-NatashaNeural", "label": "Natasha · AU"},
+        {"name": "en-AU-WilliamNeural", "label": "William · AU"},
+        {"name": "en-IN-NeerjaNeural", "label": "Neerja · India"},
+        {"name": "en-IN-PrabhatNeural", "label": "Prabhat · India"},
+        {"name": "en-IE-EmilyNeural", "label": "Emily · Ireland"},
+        {"name": "en-IE-ConnorNeural", "label": "Connor · Ireland"},
+    ]}
+
+
 @app.get("/jobs/{job_id}")
 def jobs_get(job_id: str, current_user: str = Depends(_require_user)) -> dict:
     """Poll a generation job for its real status/stage/result."""
@@ -364,10 +391,42 @@ def ingest_preview(payload: dict, current_user: str = Depends(_require_user)) ->
             "title": parsed.stats.get("title", url),
             "stats": parsed.stats,
             "preview_text": parsed.enriched_text()[:600] + "...",
+            "source_text": parsed.enriched_text()[:14000],
             "warnings": parsed.warnings,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/extract-preview")
+async def extract_preview(
+    files: Optional[List[UploadFile]] = File(None),
+    url: Optional[str] = Form(None),
+    current_user: str = Depends(_require_user),
+) -> dict:
+    """Extract a source brief before generation so users can redact it."""
+    clean_url = (url or "").strip()
+    if clean_url:
+        try:
+            parsed = ingest_url(clean_url)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to ingest URL: {exc}") from exc
+        return {"title": parsed.stats.get("title", clean_url), "doc_type": parsed.doc_type, "source_text": parsed.enriched_text()[:14000], "warnings": parsed.warnings}
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload a document or provide a URL.")
+    docs = []
+    for upload in files[:5]:
+        data = await upload.read()
+        if not data or len(data) > MAX_FILE_BYTES:
+            continue
+        try:
+            parsed = parse_document(data, upload.filename or "document")
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Could not read '{upload.filename}': {exc}") from exc
+        docs.append(f"===== SOURCE: {upload.filename} =====\n{parsed.enriched_text()}")
+    if not docs:
+        raise HTTPException(status_code=422, detail="No narratable content was found.")
+    return {"title": " + ".join(upload.filename or "document" for upload in files[:5]), "doc_type": "multi" if len(docs) > 1 else "document", "source_text": "\n\n".join(docs)[:14000], "warnings": []}
 
 
 @app.post("/generate")
@@ -381,6 +440,15 @@ async def generate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    redacted_source: str = Form(""),
+    host_a_name: str = Form("NOVA"),
+    host_b_name: str = Form("RHYS"),
+    host_a_voice: str = Form("en-US-JennyNeural"),
+    host_b_voice: str = Form("en-US-GuyNeural"),
+    host_a_rate: int = Form(0),
+    host_b_rate: int = Form(0),
+    host_a_pitch: int = Form(0),
+    host_b_pitch: int = Form(0),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     client_ip = _client_ip(request)
@@ -396,12 +464,20 @@ async def generate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
+        "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
+        "host_a_voice": host_a_voice,
+        "host_b_voice": host_b_voice,
+        "host_a_rate": max(-50, min(50, host_a_rate)),
+        "host_b_rate": max(-50, min(50, host_b_rate)),
+        "host_a_pitch": max(-20, min(20, host_a_pitch)),
+        "host_b_pitch": max(-20, min(20, host_b_pitch)),
     }
 
     # Case 1: URL / YouTube ingestion
     if clean_url:
         job_id = _new_job("generate")
-        _run_job(job_id, lambda report: _pipeline_generate_url(report, clean_url, options, current_user, playlist_id))
+        _run_job(job_id, lambda report: _pipeline_generate_url(report, clean_url, options, current_user, playlist_id, redacted_source.strip()[:14000]))
         return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
     # Case 2: Document upload
@@ -444,11 +520,11 @@ async def generate(
         prepared.append((filename, file_bytes))
 
     job_id = _new_job("generate")
-    _run_job(job_id, lambda report: _pipeline_generate_files(report, prepared, options, current_user, playlist_id))
+    _run_job(job_id, lambda report: _pipeline_generate_files(report, prepared, options, current_user, playlist_id, redacted_source.strip()[:14000]))
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
 
-def _pipeline_generate_url(report, url: str, options: dict, username: str, playlist_id: Optional[str] = None) -> dict:
+def _pipeline_generate_url(report, url: str, options: dict, username: str, playlist_id: Optional[str] = None, redacted_source: str = "") -> dict:
     """Ingest a web article or YouTube URL and run script + TTS."""
     report("ingesting url", 10)
     try:
@@ -457,10 +533,10 @@ def _pipeline_generate_url(report, url: str, options: dict, username: str, playl
         raise HTTPException(status_code=422, detail=f"Failed to ingest URL: {exc}") from exc
 
     title = parsed.stats.get("title") or url
-    return _synthesize_and_save(report, parsed, title, options, username, playlist_id, start_pct=25)
+    return _synthesize_and_save(report, parsed, title, options, username, playlist_id, start_pct=25, redacted_source=redacted_source)
 
 
-def _pipeline_generate_files(report, prepared: list, options: dict, username: str, playlist_id: Optional[str] = None) -> dict:
+def _pipeline_generate_files(report, prepared: list, options: dict, username: str, playlist_id: Optional[str] = None, redacted_source: str = "") -> dict:
     """The multi-file parse → script → TTS pipeline with real progress reporting."""
     parsed_docs = []
     for i, (filename, file_bytes) in enumerate(prepared):
@@ -498,7 +574,7 @@ def _pipeline_generate_files(report, prepared: list, options: dict, username: st
         merged = combined
         display_name = " + ".join(name for name, _ in parsed_docs)
 
-    return _synthesize_and_save(report, merged, display_name, options, username, playlist_id, start_pct=25)
+    return _synthesize_and_save(report, merged, display_name, options, username, playlist_id, start_pct=25, redacted_source=redacted_source)
 
 
 def _synthesize_and_save(
@@ -509,9 +585,10 @@ def _synthesize_and_save(
     username: str,
     playlist_id: Optional[str] = None,
     start_pct: int = 25,
+    redacted_source: str = "",
 ) -> dict:
     """Common generation, voicing with timestamps, and MongoDB persistence."""
-    enriched = doc.enriched_text()
+    enriched = redacted_source.strip() or doc.enriched_text()
 
     # --- Script ---
     report("script", start_pct + 15)
@@ -542,7 +619,7 @@ def _synthesize_and_save(
     transcript_segments: list = []
 
     try:
-        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script, options)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
@@ -612,6 +689,14 @@ def regenerate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    host_a_name: str = Form("NOVA"),
+    host_b_name: str = Form("RHYS"),
+    host_a_voice: str = Form("en-US-JennyNeural"),
+    host_b_voice: str = Form("en-US-GuyNeural"),
+    host_a_rate: int = Form(0),
+    host_b_rate: int = Form(0),
+    host_a_pitch: int = Form(0),
+    host_b_pitch: int = Form(0),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     """Re-run script generation + TTS for a saved episode WITHOUT re-uploading."""
@@ -634,6 +719,14 @@ def regenerate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
+        "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
+        "host_a_voice": host_a_voice,
+        "host_b_voice": host_b_voice,
+        "host_a_rate": max(-50, min(50, host_a_rate)),
+        "host_b_rate": max(-50, min(50, host_b_rate)),
+        "host_a_pitch": max(-20, min(20, host_a_pitch)),
+        "host_b_pitch": max(-20, min(20, host_b_pitch)),
     }
 
     job_id = _new_job("regenerate")
@@ -660,7 +753,7 @@ def _pipeline_regenerate(report, episode_id: str, source: str, options: dict, us
     audio_mime: Optional[str] = None
     transcript_segments: list = []
     try:
-        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script)
+        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(script, options)
         audio_base64 = base64.b64encode(audio_bytes).decode("ascii")
     except ValueError as exc:
         audio_error = str(exc)
@@ -743,6 +836,14 @@ async def batch_generate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    host_a_name: str = Form("NOVA"),
+    host_b_name: str = Form("RHYS"),
+    host_a_voice: str = Form("en-US-JennyNeural"),
+    host_b_voice: str = Form("en-US-GuyNeural"),
+    host_a_rate: int = Form(0),
+    host_b_rate: int = Form(0),
+    host_a_pitch: int = Form(0),
+    host_b_pitch: int = Form(0),
     current_user: str = Depends(_require_user),
 ) -> JSONResponse:
     client_ip = _client_ip(request)
@@ -781,6 +882,14 @@ async def batch_generate(
         "tone": tone if tone in {"conversational", "energetic", "calm", "expert"} else DEFAULT_OPTIONS["tone"],
         "audience": audience if audience in {"general", "student", "expert", "executive"} else DEFAULT_OPTIONS["audience"],
         "focus": (focus or "").strip()[:300],
+        "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
+        "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
+        "host_a_voice": host_a_voice,
+        "host_b_voice": host_b_voice,
+        "host_a_rate": max(-50, min(50, host_a_rate)),
+        "host_b_rate": max(-50, min(50, host_b_rate)),
+        "host_a_pitch": max(-20, min(20, host_a_pitch)),
+        "host_b_pitch": max(-20, min(20, host_b_pitch)),
     }
 
     job_id = _new_job("batch-generate")

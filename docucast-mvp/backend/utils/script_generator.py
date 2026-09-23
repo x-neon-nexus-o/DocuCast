@@ -60,6 +60,8 @@ DEFAULT_OPTIONS = {
     "tone": "conversational",
     "audience": "general",
     "focus": "",              # optional listener steering, e.g. "focus on the results section"
+    "host_a_name": "NOVA",
+    "host_b_name": "RHYS",
 }
 
 HOST_A = "NOVA"
@@ -68,6 +70,8 @@ HOST_B = "RHYS"
 
 def build_system_instruction(options: dict | None = None) -> str:
     opts = {**DEFAULT_OPTIONS, **(options or {})}
+    host_a = str(opts.get("host_a_name") or HOST_A).strip()[:24] or HOST_A
+    host_b = str(opts.get("host_b_name") or HOST_B).strip()[:24] or HOST_B
     length_desc, _ = LENGTH_PRESETS.get(opts["length"], LENGTH_PRESETS["standard"])
     tone = TONE_PRESETS.get(opts["tone"], TONE_PRESETS["conversational"])
     audience = AUDIENCE_PRESETS.get(opts["audience"], AUDIENCE_PRESETS["general"])
@@ -95,16 +99,16 @@ Rules for Professional Podcasting:
         )
 
     return (
-        f"You are a master scriptwriter writing a premium two-host podcast conversation between {HOST_A} and {HOST_B}.\n"
-        f"- {HOST_A} is the curious guide: asks sharp questions, reacts naturally, and guides the flow.\n"
-        f"- {HOST_B} is the expert explainer: grounded in the document, breaks down complex ideas, and loves a good analogy.\n"
+        f"You are a master scriptwriter writing a premium two-host podcast conversation between {host_a} and {host_b}.\n"
+        f"- {host_a} is the curious guide: asks sharp questions, reacts naturally, and guides the flow.\n"
+        f"- {host_b} is the expert explainer: grounded in the document, breaks down complex ideas, and loves a good analogy.\n"
         + common_rules
         + f"""- Format STRICTLY as alternating lines, each starting with the speaker name and a colon:
-{HOST_A}: ...
-{HOST_B}: ...
+{host_a}: ...
+{host_b}: ...
 - Make it sound intensely human: use natural agreements ("Right", "Exactly", "Wow"), brief reactions, and seamless hand-offs.
 - Avoid robotic or cheesy transitions. Let the conversation flow organically.
-- {HOST_A} opens with a compelling hook, {HOST_B} closes with a crisp, memorable takeaway.
+- {host_a} opens with a compelling hook, {host_b} closes with a crisp, memorable takeaway.
 - Keep individual turns short and punchy (1-3 sentences max)."""
     )
 

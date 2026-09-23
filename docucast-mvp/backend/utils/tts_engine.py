@@ -69,23 +69,31 @@ def sanitize_for_speech(text: str) -> str:
     return text.strip()
 
 
-def split_dialogue(script: str) -> list[tuple[str, str]]:
+def split_dialogue(script: str, voice_options: Optional[dict] = None) -> list[tuple[str, str]]:
     """Split a script into (speaker, text) segments.
 
     Non-dialogue scripts return a single ('_default', text) segment.
     Consecutive lines from the same speaker are merged to minimize TTS calls.
     """
+    voice_options = voice_options or {}
+    host_a = str(voice_options.get("host_a_name") or "NOVA").strip()[:24] or "NOVA"
+    host_b = str(voice_options.get("host_b_name") or "RHYS").strip()[:24] or "RHYS"
+    speaker_re = re.compile(
+        rf"^\s*({re.escape(host_a)}|{re.escape(host_b)}|NOVA|RHYS|HOST|GUEST|ALEX|SAM|A|B)\s*[:\-–]\s*(.+)$",
+        re.IGNORECASE,
+    )
+    custom_aliases = {host_a.upper(): "NOVA", host_b.upper(): "RHYS"}
     segments: list[tuple[str, str]] = []
     found_speaker = False
     for raw_line in script.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        m = SPEAKER_LINE_RE.match(line)
+        m = speaker_re.match(line)
         if m:
             found_speaker = True
             name = m.group(1).upper()
-            speaker = _SPEAKER_ALIASES.get(name, name)
+            speaker = custom_aliases.get(name, _SPEAKER_ALIASES.get(name, name))
             content = sanitize_for_speech(m.group(2))
             if content:
                 if segments and segments[-1][0] == speaker:
@@ -130,13 +138,14 @@ def generate_audio_bytes(text: str) -> bytes:
     return audio
 
 
-def generate_audio(script: str) -> tuple[bytes, str, str, list[dict]]:
+def generate_audio(script: str, voice_options: Optional[dict] = None) -> tuple[bytes, str, str, list[dict]]:
     """Synthesize the full script (dialogue-aware).
 
     Returns (audio_bytes, engine, mime_type, timeline).
     timeline is a list of {"speaker": str, "text": str, "start": float, "end": float}.
     """
-    segments = split_dialogue(script)
+    voice_options = voice_options or {}
+    segments = split_dialogue(script, voice_options)
     if not segments:
         raise ValueError("Script is empty after sanitization; nothing to synthesize.")
 
@@ -144,7 +153,7 @@ def generate_audio(script: str) -> tuple[bytes, str, str, list[dict]]:
 
     # Engine 1: Edge-TTS (best quality, distinct neural voices)
     try:
-        audio, timeline = _synthesize_all_edge(segments)
+        audio, timeline = _synthesize_all_edge(segments, voice_options)
         return audio, "edge-tts", "audio/mpeg", timeline
     except Exception as exc:
         errors.append(f"edge-tts: {exc}")
@@ -178,11 +187,11 @@ def generate_audio(script: str) -> tuple[bytes, str, str, list[dict]]:
 # ---------------------------------------------------------------------------
 # Edge-TTS
 # ---------------------------------------------------------------------------
-def _synthesize_all_edge(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
-    return _run_coro_safely(_edge_dialogue(segments))
+def _synthesize_all_edge(segments: list[tuple[str, str]], voice_options: Optional[dict] = None) -> tuple[bytes, list[dict]]:
+    return _run_coro_safely(_edge_dialogue(segments, voice_options or {}))
 
 
-async def _edge_dialogue(segments: list[tuple[str, str]]) -> tuple[bytes, list[dict]]:
+async def _edge_dialogue(segments: list[tuple[str, str]], voice_options: dict) -> tuple[bytes, list[dict]]:
     import edge_tts
 
     parts: list[bytes] = []
@@ -190,8 +199,13 @@ async def _edge_dialogue(segments: list[tuple[str, str]]) -> tuple[bytes, list[d
     current_time = 0.0
 
     for speaker, content in segments:
-        voice = EDGE_VOICES.get(speaker, EDGE_VOICES["_default"])
-        communicate = edge_tts.Communicate(content, voice)
+        voice_key = "host_a_voice" if speaker == "NOVA" else "host_b_voice" if speaker == "RHYS" else "_default"
+        voice = voice_options.get(voice_key) or EDGE_VOICES.get(speaker, EDGE_VOICES["_default"])
+        rate_key = "host_a_rate" if speaker == "NOVA" else "host_b_rate"
+        pitch_key = "host_a_pitch" if speaker == "NOVA" else "host_b_pitch"
+        rate = int(voice_options.get(rate_key, 0))
+        pitch = int(voice_options.get(pitch_key, 0))
+        communicate = edge_tts.Communicate(content, voice, rate=f"{rate:+d}%", pitch=f"{pitch:+d}Hz")
         chunks: list[bytes] = []
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
