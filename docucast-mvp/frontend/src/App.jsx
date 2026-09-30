@@ -372,6 +372,9 @@ export default function App() {
       formData.append(key, String(studio[key] ?? ""));
     }
     if (params.redactedSource) formData.append("redacted_source", params.redactedSource);
+    if (!isBatch && params.pageStart) formData.append("page_start", String(params.pageStart));
+    if (!isBatch && params.pageEnd) formData.append("page_end", String(params.pageEnd));
+    if (!isBatch && params.selectedPages) formData.append("selected_pages", params.selectedPages);
 
     let endpoint = `${API_URL}/generate`;
     if (isBatch) {

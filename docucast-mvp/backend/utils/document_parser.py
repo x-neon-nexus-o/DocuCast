@@ -187,7 +187,13 @@ class ParsedDocument:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def parse_document(file_bytes: bytes, filename: str) -> ParsedDocument:
+def parse_document(
+    file_bytes: bytes,
+    filename: str,
+    page_start: int = 1,
+    page_end: Optional[int] = None,
+    selected_pages: Optional[list[int]] = None,
+) -> ParsedDocument:
     """Parse a document of any supported type into a ParsedDocument.
 
     Raises:
@@ -197,7 +203,7 @@ def parse_document(file_bytes: bytes, filename: str) -> ParsedDocument:
     ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
 
     if ext == ".pdf":
-        return _parse_pdf(file_bytes)
+        return _parse_pdf(file_bytes, page_start=page_start, page_end=page_end, selected_pages=selected_pages)
     if ext == ".pptx":
         return _parse_pptx(file_bytes)
     if ext == ".docx":
@@ -225,8 +231,14 @@ def parse_document(file_bytes: bytes, filename: str) -> ParsedDocument:
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
-def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
+def _parse_pdf(
+    file_bytes: bytes,
+    page_start: int = 1,
+    page_end: Optional[int] = None,
+    selected_pages: Optional[list[int]] = None,
+) -> ParsedDocument:
     doc = ParsedDocument(doc_type="pdf")
+    selected_numbers = []
 
     # --- pass 1: pdfplumber for text + tables --------------------------------
     plumber_pages = []
@@ -237,7 +249,14 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
 
         with pdfplumber.open(BytesIO(file_bytes)) as pdf:
             total_pages = len(pdf.pages)
-            for idx, page in enumerate(pdf.pages[:MAX_PAGES]):
+            if selected_pages:
+                selected_numbers = sorted({page for page in selected_pages if 1 <= page <= total_pages})[:MAX_PAGES]
+            else:
+                selected_start = max(1, min(page_start, total_pages or 1))
+                selected_end = max(selected_start, min(page_end or total_pages or selected_start, total_pages or selected_start))
+                selected_numbers = list(range(selected_start, selected_end + 1))[:MAX_PAGES]
+            for page_no in selected_numbers:
+                page = pdf.pages[page_no - 1]
                 page_no = idx + 1
                 try:
                     page_text = page.extract_text() or ""
@@ -295,8 +314,16 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
                 )
         total_pages = len(reader.pages)
 
-        pages_to_read = min(total_pages, MAX_PAGES)
-        for i in range(pages_to_read):
+        if selected_pages:
+            selected_numbers = sorted({page for page in selected_pages if 1 <= page <= total_pages})[:MAX_PAGES]
+        else:
+            selected_start = max(1, min(page_start, total_pages or 1))
+            selected_end = max(selected_start, min(page_end or total_pages or selected_start, total_pages or selected_start))
+            selected_numbers = list(range(selected_start, selected_end + 1))[:MAX_PAGES]
+        if not selected_numbers:
+            raise ValueError("None of the selected pages exist in this PDF.")
+        selected_index = {number - 1: index for index, number in enumerate(selected_numbers)}
+        for i in [number - 1 for number in selected_numbers]:
             # Fill in text where pdfplumber came up empty
             if i >= len(plumber_pages) or not plumber_pages[i].strip():
                 try:
@@ -310,7 +337,7 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
 
         # Embedded images
         image_budget = MAX_IMAGES
-        for i in range(pages_to_read):
+        for i in [number - 1 for number in selected_numbers]:
             if image_budget <= 0:
                 break
             try:
@@ -322,7 +349,7 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
                     break
                 try:
                     entry = _analyze_image(img_file.data, page=i + 1,
-                                           page_text=plumber_pages[i] if i < len(plumber_pages) else "")
+                                           page_text=plumber_pages[selected_index[i]] if i in selected_index else "")
                 except Exception:
                     entry = None
                 if entry:
@@ -355,13 +382,23 @@ def _parse_pdf(file_bytes: bytes) -> ParsedDocument:
     doc.text = _truncate(text)
     doc.stats = {
         "pages": total_pages,
-        "pages_processed": min(total_pages, MAX_PAGES) if total_pages else len(plumber_pages),
+        "pages_processed": len(selected_numbers) if total_pages else len(plumber_pages),
+        "selected_page_start": selected_numbers[0] if selected_numbers else 1,
+        "selected_page_end": selected_numbers[-1] if selected_numbers else 1,
+        "page_previews": [
+            {"page": page_number, "text": clean_text(page_text)[:500]}
+            for page_number, page_text in zip(selected_numbers, plumber_pages)
+            if clean_text(page_text)
+        ],
         "words": len(doc.text.split()),
         "tables": len(doc.tables),
         "images": len(doc.images),
         "figures": len(doc.figures),
         "handwritten_notes": len(doc.handwritten_notes),
     }
+
+    if total_pages and (selected_numbers[0] != 1 or selected_numbers[-1] != total_pages):
+        doc.warnings.append(f"Only pages {selected_numbers[0]}–{selected_numbers[-1]} were selected for this episode.")
 
     if not doc.text.strip() and not doc.tables and not doc.images:
         raise ValueError(

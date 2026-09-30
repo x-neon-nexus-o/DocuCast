@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -264,6 +265,31 @@ def _check_throttle(ip: str, max_requests: int = THROTTLE_MAX_REQUESTS) -> None:
     log.append(now)
 
 
+def _parse_selected_pages(value: Optional[str]) -> Optional[list[int]]:
+    """Parse page expressions like `1,2,8` and `1-3,8` into page numbers."""
+    if not value or not value.strip():
+        return None
+    pages = set()
+    for part in re.split(r"[,\s]+", value.strip()):
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            if not start_text.isdigit() or not end_text.isdigit():
+                raise HTTPException(status_code=400, detail="Pages must look like 1,2,8 or 5-12.")
+            start, end = int(start_text), int(end_text)
+            if start < 1 or end < start or end - start > 100:
+                raise HTTPException(status_code=400, detail="Page range is invalid or too large.")
+            pages.update(range(start, end + 1))
+        elif part.isdigit() and int(part) > 0:
+            pages.add(int(part))
+        else:
+            raise HTTPException(status_code=400, detail="Pages must look like 1,2,8 or 5-12.")
+    if not pages or len(pages) > 100:
+        raise HTTPException(status_code=400, detail="Select between 1 and 100 pages.")
+    return sorted(pages)
+
+
 def _require_user(authorization: Optional[str] = Header(default=None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Please log in to continue.")
@@ -439,10 +465,14 @@ def ingest_preview(payload: dict, current_user: str = Depends(_require_user)) ->
 async def extract_preview(
     files: Optional[List[UploadFile]] = File(None),
     url: Optional[str] = Form(None),
+    page_start: int = Form(1),
+    page_end: Optional[int] = Form(None),
+    selected_pages: Optional[str] = Form(None),
     current_user: str = Depends(_require_user),
 ) -> dict:
     """Extract a source brief before generation so users can redact it."""
     clean_url = (url or "").strip()
+    selected_page_numbers = _parse_selected_pages(selected_pages)
     if clean_url:
         try:
             parsed = ingest_url(clean_url)
@@ -451,19 +481,23 @@ async def extract_preview(
         return {"title": parsed.stats.get("title", clean_url), "doc_type": parsed.doc_type, "source_text": parsed.enriched_text()[:14000], "warnings": parsed.warnings}
     if not files:
         raise HTTPException(status_code=400, detail="Upload a document or provide a URL.")
+    if page_start < 1 or (page_end is not None and page_end < page_start):
+        raise HTTPException(status_code=400, detail="Page range is invalid.")
     docs = []
+    page_stats = []
     for upload in files[:5]:
         data = await upload.read()
         if not data or len(data) > MAX_FILE_BYTES:
             continue
         try:
-            parsed = parse_document(data, upload.filename or "document")
+            parsed = parse_document(data, upload.filename or "document", page_start=page_start, page_end=page_end, selected_pages=selected_page_numbers)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Could not read '{upload.filename}': {exc}") from exc
         docs.append(f"===== SOURCE: {upload.filename} =====\n{parsed.enriched_text()}")
+        page_stats.append(parsed.stats)
     if not docs:
         raise HTTPException(status_code=422, detail="No narratable content was found.")
-    return {"title": " + ".join(upload.filename or "document" for upload in files[:5]), "doc_type": "multi" if len(docs) > 1 else "document", "source_text": "\n\n".join(docs)[:14000], "warnings": []}
+    return {"title": " + ".join(upload.filename or "document" for upload in files[:5]), "doc_type": "multi" if len(docs) > 1 else "document", "source_text": "\n\n".join(docs)[:14000], "stats": page_stats[0] if len(page_stats) == 1 else {"pages": max((item.get("pages", 0) for item in page_stats), default=0)}, "warnings": []}
 
 
 @app.post("/generate")
@@ -477,6 +511,9 @@ async def generate(
     tone: str = Form("conversational"),
     audience: str = Form("general"),
     focus: str = Form(""),
+    page_start: int = Form(1),
+    page_end: Optional[int] = Form(None),
+    selected_pages: Optional[str] = Form(None),
     language: str = Form("en"),
     redacted_source: str = Form(""),
     host_a_name: str = Form("NOVA"),
@@ -493,6 +530,9 @@ async def generate(
     _check_throttle(client_ip)
 
     clean_url = (url or "").strip()
+    selected_page_numbers = _parse_selected_pages(selected_pages)
+    if page_start < 1 or (page_end is not None and page_end < page_start):
+        raise HTTPException(status_code=400, detail="Page range is invalid.")
     if not files and not clean_url:
         raise HTTPException(status_code=400, detail="Please upload a document or provide an article/YouTube link.")
 
@@ -559,7 +599,7 @@ async def generate(
         prepared.append((filename, file_bytes))
 
     job_id = _new_job("generate")
-    _run_job(job_id, lambda report: _pipeline_generate_files(report, prepared, options, current_user, playlist_id, redacted_source.strip()[:14000]))
+    _run_job(job_id, lambda report: _pipeline_generate_files(report, prepared, options, current_user, playlist_id, redacted_source.strip()[:14000], page_start, page_end, selected_page_numbers))
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
 
 
@@ -575,14 +615,14 @@ def _pipeline_generate_url(report, url: str, options: dict, username: str, playl
     return _synthesize_and_save(report, parsed, title, options, username, playlist_id, start_pct=25, redacted_source=redacted_source)
 
 
-def _pipeline_generate_files(report, prepared: list, options: dict, username: str, playlist_id: Optional[str] = None, redacted_source: str = "") -> dict:
+def _pipeline_generate_files(report, prepared: list, options: dict, username: str, playlist_id: Optional[str] = None, redacted_source: str = "", page_start: int = 1, page_end: Optional[int] = None, selected_pages: Optional[list[int]] = None) -> dict:
     """The multi-file parse → script → TTS pipeline with real progress reporting."""
     parsed_docs = []
     for i, (filename, file_bytes) in enumerate(prepared):
         share = 5 + int(15 * (i + 1) / len(prepared))
         report(f"parsing ({i + 1}/{len(prepared)})", share)
         try:
-            parsed = parse_document(file_bytes, filename)
+            parsed = parse_document(file_bytes, filename, page_start=page_start, page_end=page_end, selected_pages=selected_pages)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f"'{filename}': {exc}") from exc
         except Exception as exc:

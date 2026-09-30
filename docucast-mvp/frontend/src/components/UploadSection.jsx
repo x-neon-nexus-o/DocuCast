@@ -110,6 +110,14 @@ export default function UploadSection({
   const [briefText, setBriefText] = useState("");
   const [excludedLines, setExcludedLines] = useState(new Set());
   const [voiceCatalog, setVoiceCatalog] = useState([]);
+  const [pageCount, setPageCount] = useState(0);
+  const [pageStart, setPageStart] = useState(1);
+  const [pageEnd, setPageEnd] = useState("");
+  const [pageSelectionText, setPageSelectionText] = useState("");
+  const [pagePreviewLoading, setPagePreviewLoading] = useState(false);
+  const [pagePreviewNonce, setPagePreviewNonce] = useState(0);
+  const [pagePreviews, setPagePreviews] = useState([]);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
 
   // Batch / Playlist state
   const [batchTitle, setBatchTitle] = useState("");
@@ -125,24 +133,61 @@ export default function UploadSection({
   }, [authToken]);
 
   useEffect(() => {
+    const pdf = files.find((file) => file.name.toLowerCase().endsWith(".pdf"));
+    if (!pdf) {
+      setPdfPreviewUrl("");
+      return undefined;
+    }
+    const objectUrl = URL.createObjectURL(pdf);
+    setPdfPreviewUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [files]);
+
+  useEffect(() => {
     if (sourceMode !== "files" || !files.length || loading) return undefined;
     const extract = async () => {
+      setPagePreviewLoading(true);
       const data = new FormData();
       files.forEach((file) => data.append("files", file));
+      data.append("page_start", String(pageStart));
+      if (pageEnd) data.append("page_end", String(pageEnd));
+      if (pageSelectionText) data.append("selected_pages", pageSelectionText);
       try {
         const response = await axios.post(`${API_URL}/extract-preview`, data, {
           headers: { Authorization: `Bearer ${authToken}` }, timeout: 30_000,
         });
         setBriefText(response.data.source_text || "");
+        setPagePreviews(response.data.stats?.page_previews || []);
+        const pages = Number(response.data.stats?.pages || 0);
+        if (pages) {
+          setPageCount(pages);
+          if (!pageEnd) setPageEnd(String(pages));
+          if (!pageSelectionText) setPageSelectionText(`1-${pages}`);
+        }
         setExcludedLines(new Set());
         setPreviewError("");
       } catch (err) {
         setPreviewError(err?.response?.data?.detail || "Could not extract a preview.");
+        setPagePreviews([]);
+      } finally {
+        setPagePreviewLoading(false);
       }
     };
     extract();
     return undefined;
-  }, [authToken, files, loading, sourceMode]);
+  }, [authToken, files, loading, pagePreviewNonce, sourceMode]);
+
+  // Text and Markdown can be previewed immediately without waiting for the API.
+  useEffect(() => {
+    if (sourceMode !== "files" || !files.length || loading) return undefined;
+    const textFile = files.find((file) => /\.(txt|text|md|markdown)$/i.test(file.name));
+    if (!textFile) return undefined;
+    let active = true;
+    textFile.text().then((text) => {
+      if (active && text.trim()) setBriefText(text.slice(0, 14000));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [files, loading, sourceMode]);
 
   const acceptFile = useCallback(
     (candidate) => {
@@ -245,7 +290,7 @@ export default function UploadSection({
         description: batchDesc.trim(),
       });
     } else {
-      onGenerate({ files, redactedSource: approvedBrief });
+      onGenerate({ files, redactedSource: approvedBrief, pageStart, pageEnd: pageEnd || undefined, selectedPages: pageSelectionText || undefined });
     }
   };
 
@@ -416,6 +461,84 @@ export default function UploadSection({
             )}
           </div>
 
+          {sourceMode === "files" && files.length > 0 && pageCount > 0 && (
+            <div className="mt-5 rounded-2xl border border-aurora-cyan/25 bg-aurora-cyan/[0.04] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-widest text-aurora-cyan">Page selection</p>
+                  <p className="mt-1 text-xs text-dim">Choose which PDF pages reach the summarizer. Non-PDF files use their full content.</p>
+                </div>
+                <span className="rounded-full border border-aurora-cyan/30 px-3 py-1 text-[11px] font-semibold text-cyan-200">
+                  Pages {pageStart}–{pageEnd || pageCount} of {pageCount}
+                </span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:max-w-sm">
+                <label className="text-[11px] text-dim">From
+                  <input type="number" min="1" max={pageCount} value={pageStart} onChange={(e) => { setPageStart(Math.max(1, Math.min(pageCount, Number(e.target.value) || 1))); setBriefText(""); setExcludedLines(new Set()); }} className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-ink" />
+                </label>
+                <label className="text-[11px] text-dim">To
+                  <input type="number" min={pageStart} max={pageCount} value={pageEnd || pageCount} onChange={(e) => { setPageEnd(String(Math.max(pageStart, Math.min(pageCount, Number(e.target.value) || pageCount)))); setBriefText(""); setExcludedLines(new Set()); }} className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-ink" />
+                </label>
+              </div>
+              <p className="mt-3 text-xs font-semibold text-ink">Selected range: pages {pageStart}–{pageEnd || pageCount}</p>
+              <label className="mt-3 block text-[11px] text-dim">Specific pages or mixed ranges
+                <input type="text" value={pageSelectionText} onChange={(e) => { setPageSelectionText(e.target.value); setBriefText(""); setExcludedLines(new Set()); }} placeholder="Example: 1,2,8 or 1-2,8" className="mt-1 w-full rounded-lg border border-aurora-cyan/30 bg-black/30 px-3 py-2 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-cyan/50" />
+              </label>
+              <p className="mt-2 text-xs font-semibold text-ink">Selected pages: {pageSelectionText || `${pageStart}–${pageEnd || pageCount}`}</p>
+              <button type="button" disabled={pagePreviewLoading} onClick={() => { setBriefText(""); setExcludedLines(new Set()); setPagePreviewNonce((value) => value + 1); }} className="mt-2 text-xs font-semibold text-aurora-cyan hover:underline disabled:opacity-50">
+                {pagePreviewLoading ? "Reading selected pages…" : "Refresh selected-page preview"}
+              </button>
+            </div>
+          )}
+
+          {sourceMode === "files" && pdfPreviewUrl && (
+            <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(18rem,0.9fr)]">
+              <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/20">
+                <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-widest text-dim">Document preview</p>
+                  <span className="text-[11px] text-aurora-cyan">Original page numbers preserved</span>
+                </div>
+                <iframe
+                  title="Uploaded PDF preview"
+                  src={`${pdfPreviewUrl}#page=${pageStart}`}
+                  className="h-[30rem] w-full bg-white"
+                />
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-widest text-dim">Selected pages</p>
+                  <span className="text-[11px] text-dim">{pagePreviews.length} shown</span>
+                </div>
+                <div className="panel-scroll mt-3 max-h-[26rem] space-y-2 overflow-y-auto pr-1">
+                  {pagePreviews.length > 0 ? pagePreviews.map((page) => (
+                    <div key={page.page} className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                      <div className="flex items-center gap-2">
+                        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-aurora-cyan/30 bg-aurora-cyan/10 text-[11px] font-bold text-cyan-200">{page.page}</span>
+                        <span className="text-[11px] font-semibold text-aurora-cyan">Page {page.page}</span>
+                      </div>
+                      <p className="mt-2 text-xs leading-relaxed text-dim">{page.text || "No selectable text; visual content will be analyzed if available."}</p>
+                    </div>
+                  )) : (
+                    <p className="text-xs leading-relaxed text-dim">Refresh the selected-page preview to load the page representations.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {sourceMode === "files" && files.length > 0 && briefText && !pdfPreviewUrl && (
+            <div className="mt-5 overflow-hidden rounded-2xl border border-aurora-cyan/25 bg-aurora-cyan/[0.04]">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-4 py-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-widest text-aurora-cyan">Live document preview</p>
+                  <p className="mt-1 text-[11px] text-dim">Extracted content from {files.length === 1 ? files[0].name : `${files.length} selected sources`}</p>
+                </div>
+                <span className="rounded-full border border-aurora-cyan/30 px-2.5 py-1 text-[10px] text-cyan-200">Ready to review</span>
+              </div>
+              <pre className="panel-scroll max-h-[30rem] overflow-y-auto whitespace-pre-wrap px-4 py-4 font-mono text-xs leading-relaxed text-ink/85">{briefText}</pre>
+            </div>
+          )}
+
           <input
             ref={inputRef}
             type="file"
@@ -446,6 +569,7 @@ export default function UploadSection({
                   setPreviewData(null);
                   setBriefText("");
                   setExcludedLines(new Set());
+                  setPagePreviews([]);
                   setPreviewError("");
                 }}
                 placeholder="https://www.youtube.com/watch?v=... or https://example.com/article"
