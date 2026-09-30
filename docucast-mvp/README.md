@@ -110,6 +110,10 @@ flowchart TB
 - Persistent chat messages for episodes
 - Batch generation from multiple files and URLs
 - Playlists with episode counts and continuous playback
+- Personal notebook notes saved per episode in the browser
+- Timestamped audio bookmarks for returning to important moments
+- Lightweight study cards generated from show notes and chapters
+- Source markers such as `[S1]` with a grounding trail for document sections and visuals
 
 ## Project structure
 

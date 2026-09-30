@@ -73,32 +73,56 @@ class ParsedDocument:
     stats: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
 
+    def citations(self) -> list[dict]:
+        """Return stable source markers used by grounded scripts and the UI."""
+        refs = []
+        if self.text.strip():
+            refs.append({"id": "S1", "label": "Document body", "location": "main text"})
+        next_id = 2 if self.text.strip() else 1
+        for label, items, location_key in (
+            ("Table", self.tables, "page"),
+            ("Chart", self.charts, "page"),
+            ("Figure", self.figures, "page"),
+            ("Image", self.images, "page"),
+            ("Handwritten note", self.handwritten_notes, "page"),
+            ("Speaker note", self.speaker_notes, "page"),
+        ):
+            for item in items:
+                location = item.get(location_key, "unknown")
+                refs.append({"id": f"S{next_id}", "label": label, "location": f"page/slide {location}"})
+                next_id += 1
+        return refs
+
     def enriched_text(self) -> str:
         """Merge everything into one narratable brief for the LLM."""
         sections: list[str] = []
         if self.text.strip():
-            sections.append("=== DOCUMENT BODY ===\n" + self.text.strip())
+            sections.append("=== DOCUMENT BODY [S1] ===\n" + self.text.strip())
 
         if self.tables:
             lines = ["=== TABLES (data extracted from tables in the document) ==="]
-            for t in self.tables:
-                lines.append(f"- {t.get('narration', '')}")
+            source_base = 2 if self.text.strip() else 1
+            for index, t in enumerate(self.tables, start=source_base):
+                lines.append(f"- [S{index}] {t.get('narration', '')}")
             sections.append("\n".join(lines))
 
         if self.charts:
             lines = ["=== GRAPHS & CHARTS (actual data series read from the charts) ==="]
-            for c in self.charts:
-                lines.append(f"- {c.get('narration', '')}")
+            offset = (2 if self.text.strip() else 1) + len(self.tables)
+            for index, c in enumerate(self.charts, start=offset):
+                lines.append(f"- [S{index}] {c.get('narration', '')}")
             sections.append("\n".join(lines))
 
         if self.figures:
             lines = ["=== FIGURE / GRAPH CAPTIONS found in the document ==="]
-            for f in self.figures:
-                lines.append(f"- (page {f.get('page', '?')}) {f.get('caption', '')}")
+            offset = (2 if self.text.strip() else 1) + len(self.tables) + len(self.charts)
+            for index, f in enumerate(self.figures, start=offset):
+                lines.append(f"- [S{index}] (page {f.get('page', '?')}) {f.get('caption', '')}")
             sections.append("\n".join(lines))
 
         img_lines = []
-        for img in self.images:
+        offset = (2 if self.text.strip() else 1) + len(self.tables) + len(self.charts) + len(self.figures)
+        for index, img in enumerate(self.images, start=offset):
             desc = img.get("description") or ""
             ocr = img.get("ocr_text") or ""
             bits = []
@@ -108,7 +132,7 @@ class ParsedDocument:
                 bits.append(f"text inside the image: \"{ocr[:400]}\"")
             if bits:
                 img_lines.append(
-                    f"- Image on page {img.get('page', '?')} ({img.get('kind', 'image')}): "
+                    f"- [S{index}] Image on page {img.get('page', '?')} ({img.get('kind', 'image')}): "
                     + " | ".join(bits)
                 )
         if img_lines:
@@ -118,14 +142,16 @@ class ParsedDocument:
 
         if self.handwritten_notes:
             lines = ["=== HANDWRITTEN NOTES / ANNOTATIONS detected ==="]
-            for n in self.handwritten_notes:
-                lines.append(f"- (page {n.get('page', '?')}) {n.get('text', '')}")
+            offset = (2 if self.text.strip() else 1) + len(self.tables) + len(self.charts) + len(self.figures) + len(self.images)
+            for index, n in enumerate(self.handwritten_notes, start=offset):
+                lines.append(f"- [S{index}] (page {n.get('page', '?')}) {n.get('text', '')}")
             sections.append("\n".join(lines))
 
         if self.speaker_notes:
             lines = ["=== PRESENTER / SPEAKER NOTES (hidden notes from the slides) ==="]
-            for n in self.speaker_notes:
-                lines.append(f"- (slide {n.get('page', '?')}) {n.get('text', '')}")
+            offset = (2 if self.text.strip() else 1) + len(self.tables) + len(self.charts) + len(self.figures) + len(self.images) + len(self.handwritten_notes)
+            for index, n in enumerate(self.speaker_notes, start=offset):
+                lines.append(f"- [S{index}] (slide {n.get('page', '?')}) {n.get('text', '')}")
             sections.append("\n".join(lines))
 
         return "\n\n".join(sections).strip()
@@ -154,6 +180,7 @@ class ParsedDocument:
             "speaker_notes": self.speaker_notes,
             "stats": self.stats,
             "warnings": self.warnings,
+            "citations": self.citations(),
         }
 
 

@@ -89,6 +89,7 @@ Rules for Professional Podcasting:
 - Audience: {audience}.
 - Write the entire spoken script in language code: {language}. Keep the speaker names exactly as labels, but translate every spoken sentence.
 - Output PLAIN spoken text only: NO markdown, NO asterisks, NO emoji, NO stage directions in brackets. Just the words to be spoken.
+- Preserve source markers such as [S1] when making factual claims. Place the marker at the end of the sentence. Do not invent marker IDs.
 """
     if opts.get("focus"):
         common_rules += f"- Listener steering request (honor it if the document supports it): {opts['focus'][:300]}\n"

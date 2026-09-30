@@ -595,6 +595,30 @@ function ShowNotesCard({ notes, onCopy, copied }) {
   );
 }
 
+function CitationLegend({ citations }) {
+  if (!citations?.length) return null;
+  return (
+    <section aria-label="Source citations" className="glass rounded-[1.75rem] p-5 sm:p-6">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-aurora-teal">Grounding trail</p>
+          <h3 className="mt-1 font-display text-lg font-semibold">Sources used by the episode</h3>
+        </div>
+        <span className="text-[11px] text-dim">Markers appear as [S1], [S2]…</span>
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {citations.map((citation) => (
+          <div key={citation.id} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs">
+            <span className="font-mono font-bold text-aurora-cyan">[{citation.id}]</span>
+            <span className="ml-2 font-semibold text-ink">{citation.label}</span>
+            <span className="ml-1 text-dim">· {citation.location}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Result section                                                      */
 /* ------------------------------------------------------------------ */
@@ -613,6 +637,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
     episode_id: episodeId,
     show_notes: showNotes,
   } = result;
+  const citations = analysis?.citations || [];
   const displayNames = {
     NOVA: result.options?.host_a_name || "Nova",
     RHYS: result.options?.host_b_name || "Rhys",
@@ -626,7 +651,23 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
   const [currentTime, setCurrentTime] = useState(0);
   const [seekTime, setSeekTime] = useState(null);
   const [autoFollow, setAutoFollow] = useState(true);
+  const [personalNote, setPersonalNote] = useState(() => {
+    try { return localStorage.getItem(`docucast_note_${result.episode_id || result.filename}`) || ""; } catch { return ""; }
+  });
+  const [bookmarks, setBookmarks] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(`docucast_bookmarks_${result.episode_id || result.filename}`) || "[]"); } catch { return []; }
+  });
+  const [showStudyCards, setShowStudyCards] = useState(false);
+  const [revealedCard, setRevealedCard] = useState(-1);
   const turnRefs = useRef([]);
+
+  useEffect(() => {
+    try { localStorage.setItem(`docucast_note_${result.episode_id || result.filename}`, personalNote); } catch { /* storage unavailable */ }
+  }, [personalNote, result.episode_id, result.filename]);
+
+  useEffect(() => {
+    try { localStorage.setItem(`docucast_bookmarks_${result.episode_id || result.filename}`, JSON.stringify(bookmarks)); } catch { /* storage unavailable */ }
+  }, [bookmarks, result.episode_id, result.filename]);
 
   // Seed the editor with the current script each time it's opened.
   useEffect(() => {
@@ -696,6 +737,18 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
     window.URL.revokeObjectURL(url);
   };
 
+  const addBookmark = (turn) => {
+    if (turn?.start == null) return;
+    setBookmarks((current) => current.some((item) => item.start === turn.start)
+      ? current
+      : [...current, { start: turn.start, text: turn.text, speaker: turn.speaker }].sort((a, b) => a.start - b.start));
+  };
+
+  const studyCards = useMemo(() => [
+    ...(showNotes?.takeaways || []).map((text) => ({ question: "What is an important takeaway?", answer: text })),
+    ...(showNotes?.chapters || []).map((chapter) => ({ question: `What is covered in “${chapter.title}”?`, answer: chapter.summary || chapter.title })),
+  ].slice(0, 12), [showNotes]);
+
   // Regenerate: re-run the LLM on the SAME document with new studio settings.
   const canRegenerate = !!episodeId && !!onRegenerate && !regenerating;
   // Resynthesize: re-run TTS on an edited script (no LLM call needed).
@@ -753,6 +806,73 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
       {/* Show notes + chapters */}
       {showNotes && (showNotes.title || showNotes.takeaways?.length || showNotes.chapters?.length) && (
         <ShowNotesCard notes={showNotes} onCopy={copyShowNotes} copied={notesCopied} />
+      )}
+      <CitationLegend citations={citations} />
+
+      <section aria-label="Personal episode notes" className="glass rounded-[1.75rem] p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-aurora-cyan">Your notebook</p>
+            <h3 className="mt-1 font-display text-lg font-semibold">Keep a thought beside this episode</h3>
+          </div>
+          <span className="text-[11px] text-dim">Saved in this browser</span>
+        </div>
+        <textarea
+          value={personalNote}
+          onChange={(event) => setPersonalNote(event.target.value)}
+          rows={3}
+          placeholder="Add a question, takeaway, or follow-up…"
+          className="mt-4 w-full resize-y rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm leading-relaxed text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-cyan/50"
+        />
+      </section>
+
+      {bookmarks.length > 0 && (
+        <section aria-label="Audio bookmarks" className="glass rounded-[1.75rem] p-5 sm:p-6">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-aurora-violet">Listening trail</p>
+              <h3 className="mt-1 font-display text-lg font-semibold">Audio bookmarks</h3>
+            </div>
+            <button type="button" onClick={() => setBookmarks([])} className="text-xs text-dim hover:text-ink">Clear all</button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {bookmarks.map((bookmark) => (
+              <button
+                key={bookmark.start}
+                type="button"
+                onClick={() => setSeekTime(bookmark.start)}
+                className="rounded-xl border border-aurora-violet/30 bg-aurora-violet/10 px-3 py-2 text-left text-xs text-ink hover:border-aurora-violet/60"
+              >
+                <span className="font-mono text-aurora-violet">{formatTime(bookmark.start)}</span>
+                <span className="ml-2 line-clamp-1">{bookmark.text}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {studyCards.length > 0 && (
+        <section aria-label="Study cards" className="glass rounded-[1.75rem] p-5 sm:p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-aurora-teal">Review mode</p>
+              <h3 className="mt-1 font-display text-lg font-semibold">Study cards</h3>
+            </div>
+            <button type="button" onClick={() => { setShowStudyCards((value) => !value); setRevealedCard(-1); }} className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold text-dim hover:text-ink hover:border-aurora-teal/50">
+              {showStudyCards ? "Hide cards" : `${studyCards.length} cards`}
+            </button>
+          </div>
+          {showStudyCards && (
+            <div className="mt-4 grid gap-2.5">
+              {studyCards.map((card, index) => (
+                <button key={index} type="button" onClick={() => setRevealedCard(revealedCard === index ? -1 : index)} className="rounded-xl border border-white/10 bg-black/20 p-4 text-left hover:border-aurora-teal/50">
+                  <p className="text-sm font-semibold text-ink">{card.question}</p>
+                  <p className="mt-2 text-xs leading-relaxed text-dim">{revealedCard === index ? card.answer : "Click to reveal answer"}</p>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
       )}
 
       {/* Studio actions — tune & re-run without re-uploading (NotebookLM feel) */}
@@ -1012,6 +1132,16 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
                       <span className="text-[10px] font-semibold text-dim opacity-0 group-hover:opacity-100 transition-opacity">
                         jump to audio ⇗
                       </span>
+                      {hasTime && (
+                        <button
+                          type="button"
+                          onClick={(event) => { event.stopPropagation(); addBookmark(turn); }}
+                          className="text-[10px] text-dim hover:text-aurora-violet"
+                          title="Bookmark this moment"
+                        >
+                          ☆
+                        </button>
+                      )}
                     </div>
                     <p className={`text-sm leading-relaxed transition-colors ${isActive ? "text-white font-medium" : "text-ink/90"}`}>
                       {turn.text}
