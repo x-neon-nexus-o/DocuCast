@@ -11,7 +11,9 @@ import hashlib
 import json
 import os
 import secrets
+import smtplib
 import time
+from email.message import EmailMessage
 from typing import Any, Optional
 
 from bson import ObjectId
@@ -70,6 +72,15 @@ def initialize_database() -> None:
         db.users.drop_index("email_1")
     except pymongo.errors.OperationFailure:
         pass  # Index doesn't exist, that's fine
+    try:
+        db.users.create_index([("email", pymongo.ASCENDING)], sparse=True)
+    except pymongo.errors.OperationFailure:
+        pass
+    try:
+        db.password_reset_tokens.create_index([("expires_at", pymongo.ASCENDING)], expireAfterSeconds=0)
+        db.password_reset_tokens.create_index([("token_hash", pymongo.ASCENDING)], unique=True)
+    except pymongo.errors.OperationFailure:
+        pass
     try:
         db.sessions.drop_index("token_1")
     except pymongo.errors.OperationFailure:
@@ -208,6 +219,91 @@ def register_user(username: str, password: str) -> None:
         })
     except pymongo.errors.DuplicateKeyError as exc:
         raise ValueError("That username is already taken.") from exc
+
+
+def register_user_with_email(username: str, email: str, password: str) -> None:
+    """Register a user with a normalized recovery email address."""
+    username = _normalize_username(username)
+    email = (email or "").strip().lower()
+    if not email or "@" not in email or len(email) > 254:
+        raise ValueError("Enter a valid email address.")
+    if not username or len(username) < 3:
+        raise ValueError("Username must be at least 3 characters long.")
+    if len(password) < 6:
+        raise ValueError("Password must be at least 6 characters long.")
+    db = get_db()
+    if db.users.find_one({"$or": [{"username": username}, {"email": email}]}):
+        raise ValueError("That username or email is already registered.")
+    try:
+        db.users.insert_one({
+            "username": username,
+            "email": email,
+            "password_hash": hash_password(password),
+            "created_at": int(time.time()),
+        })
+    except pymongo.errors.DuplicateKeyError as exc:
+        raise ValueError("That username or email is already registered.") from exc
+
+
+def _send_reset_email(email: str, reset_url: str) -> None:
+    """Send reset mail when SMTP is configured; otherwise log a local link."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host:
+        if os.getenv("DOCUCAST_ALLOW_DEV_RESET_LINK", "false").lower() == "true":
+            print(f"[docucast] development password reset link: {reset_url}")
+        return
+    message = EmailMessage()
+    message["Subject"] = "Reset your DocuCast password"
+    message["From"] = os.getenv("SMTP_FROM", os.getenv("SMTP_USERNAME", "no-reply@localhost"))
+    message["To"] = email
+    message.set_content(f"Reset your DocuCast password using this link. It expires in 30 minutes:\n\n{reset_url}\n\nIf you did not request this, ignore this email.")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    with smtplib.SMTP(host, port, timeout=10) as server:
+        server.starttls()
+        username = os.getenv("SMTP_USERNAME", "")
+        password = os.getenv("SMTP_PASSWORD", "")
+        if username:
+            server.login(username, password)
+        server.send_message(message)
+
+
+def request_password_reset(email: str) -> Optional[str]:
+    """Create a one-time hashed reset token and notify the address if registered."""
+    normalized = (email or "").strip().lower()
+    db = get_db()
+    user = db.users.find_one({"email": normalized})
+    if user is None:
+        return None
+    raw_token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    db.password_reset_tokens.insert_one({
+        "user_id": user["_id"],
+        "email": normalized,
+        "token_hash": _token_hash(raw_token),
+        "created_at": now,
+        "expires_at": now + 1800,
+    })
+    frontend = os.getenv("VERCEL_ORIGIN", "http://localhost:5173").rstrip("/")
+    _send_reset_email(normalized, f"{frontend}/?reset_token={raw_token}")
+    return raw_token
+
+
+def reset_password_with_token(token: str, new_password: str) -> None:
+    """Consume a valid reset token, update the password, and revoke sessions."""
+    if len(new_password) < 6:
+        raise ValueError("Password must be at least 6 characters long.")
+    digest = _token_hash((token or "").strip())
+    db = get_db()
+    record = db.password_reset_tokens.find_one({"token_hash": digest})
+    if record is None or record.get("expires_at", 0) < int(time.time()):
+        if record:
+            db.password_reset_tokens.delete_one({"_id": record["_id"]})
+        raise ValueError("This password reset link is invalid or expired.")
+    result = db.users.update_one({"_id": record["user_id"]}, {"$set": {"password_hash": hash_password(new_password)}})
+    if result.matched_count == 0:
+        raise ValueError("This password reset link is invalid or expired.")
+    db.password_reset_tokens.delete_one({"_id": record["_id"]})
+    db.sessions.delete_many({"user_id": record["user_id"]})
 
 
 # ---------------------------------------------------------------------------

@@ -173,9 +173,11 @@ export default function App() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [authUser, setAuthUser] = useState(null);
   const [authError, setAuthError] = useState("");
-  const [authMode, setAuthMode] = useState("login");
-  const [credentials, setCredentials] = useState({ username: "", password: "" });
+  const [authMode, setAuthMode] = useState(() => new URLSearchParams(window.location.search).has("reset_token") ? "reset" : "login");
+  const [credentials, setCredentials] = useState({ username: "", email: "", password: "", confirmPassword: "" });
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get("reset_token") || "");
   const [loginLoading, setLoginLoading] = useState(false);
+  const [resetMessage, setResetMessage] = useState("");
   const [files, setFiles] = useState([]); // multi-document sources (max 5)
   const [studio, setStudio] = useState(loadStudioPrefs);
   const [loading, setLoading] = useState(false);
@@ -276,27 +278,45 @@ export default function App() {
     async (event) => {
       event.preventDefault();
       setAuthError("");
+      setResetMessage("");
       setLoginLoading(true);
 
       try {
-        const { data } = await axios.post(`${API_URL}/auth/${authMode}`, credentials, {
+        if (authMode === "forgot") {
+          const { data } = await axios.post(`${API_URL}/auth/forgot-password`, { email: credentials.email }, { timeout: 15_000 });
+          setResetMessage(data.message);
+          return;
+        }
+        if (authMode === "reset") {
+          if (credentials.password !== credentials.confirmPassword) throw new Error("Passwords do not match.");
+          const { data } = await axios.post(`${API_URL}/auth/reset-password`, { token: resetToken, password: credentials.password }, { timeout: 15_000 });
+          setResetMessage(data.message);
+          setAuthMode("login");
+          window.history.replaceState({}, "", window.location.pathname);
+          setCredentials({ username: "", email: "", password: "", confirmPassword: "" });
+          return;
+        }
+        const payload = authMode === "register"
+          ? { username: credentials.username, email: credentials.email, password: credentials.password }
+          : { username: credentials.username, password: credentials.password };
+        const { data } = await axios.post(`${API_URL}/auth/${authMode}`, payload, {
           timeout: 15_000,
         });
         localStorage.setItem(TOKEN_KEY, data.access_token);
         setAuthToken(data.access_token);
         setAuthUser(data.user);
-        setCredentials({ username: "", password: "" });
+        setCredentials({ username: "", email: "", password: "", confirmPassword: "" });
       } catch (err) {
         setAuthError(
           err?.response?.data?.detail ||
             err?.message ||
-            `Unable to ${authMode === "register" ? "sign up" : "sign in"}. Please try again.`,
+            err?.message || `Unable to ${authMode === "register" ? "sign up" : "sign in"}. Please try again.`,
         );
       } finally {
         setLoginLoading(false);
       }
     },
-    [authMode, credentials],
+    [authMode, credentials, resetToken],
   );
 
   const handleLogout = useCallback(() => {
@@ -566,29 +586,36 @@ export default function App() {
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <h2 className="font-display text-2xl font-semibold">
-                  {authMode === "register" ? "Create account" : "Sign in"}
+                  {authMode === "register" ? "Create account" : authMode === "forgot" ? "Forgot password" : authMode === "reset" ? "Set a new password" : "Sign in"}
                 </h2>
                 <p className="mt-2 text-sm text-dim">
                   {authMode === "register"
                     ? "Create a new account to get started."
+                    : authMode === "forgot"
+                    ? "Enter your registered email. We will send a secure reset link."
+                    : authMode === "reset"
+                    ? "Choose a strong password for your account."
                     : "Enter your credentials to continue."}
                 </p>
               </div>
 
+              {authMode !== "reset" && (
               <button
                 type="button"
                 onClick={() => {
                   setAuthError("");
+                  setResetMessage("");
                   setAuthMode((current) => (current === "login" ? "register" : "login"));
                 }}
                 className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-semibold text-dim transition-colors hover:text-ink hover:border-aurora-violet/50"
               >
                 {authMode === "register" ? "Have an account? Sign in" : "New here? Register"}
               </button>
+              )}
             </div>
 
             <form onSubmit={handleLogin} className="mt-8 space-y-5">
-              <label className="block">
+              {authMode !== "reset" && authMode !== "forgot" && <label className="block">
                 <span className="block text-xs font-semibold uppercase tracking-widest text-dim">Username</span>
                 <input
                   type="text"
@@ -598,19 +625,36 @@ export default function App() {
                   className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-violet/60 focus:border-transparent transition-shadow"
                   placeholder="admin"
                 />
-              </label>
+              </label>}
 
-              <label className="block">
+              {authMode === "register" && <label className="block">
+                <span className="block text-xs font-semibold uppercase tracking-widest text-dim">Email</span>
+                <input type="email" value={credentials.email} onChange={(event) => setCredentials((current) => ({ ...current, email: event.target.value }))} autoComplete="email" className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-violet/60" placeholder="you@example.com" />
+              </label>}
+
+              {(authMode === "forgot") && <label className="block">
+                <span className="block text-xs font-semibold uppercase tracking-widest text-dim">Registered email</span>
+                <input type="email" value={credentials.email} onChange={(event) => setCredentials((current) => ({ ...current, email: event.target.value }))} autoComplete="email" className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-cyan/60" placeholder="you@example.com" />
+              </label>}
+
+              {authMode !== "forgot" && <label className="block">
                 <span className="block text-xs font-semibold uppercase tracking-widest text-dim">Password</span>
                 <input
                   type="password"
                   value={credentials.password}
                   onChange={(event) => setCredentials((current) => ({ ...current, password: event.target.value }))}
-                  autoComplete="current-password"
+                  autoComplete={authMode === "reset" ? "new-password" : "current-password"}
                   className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-violet/60 focus:border-transparent transition-shadow"
                   placeholder="••••••••"
                 />
-              </label>
+              </label>}
+
+              {authMode === "reset" && <label className="block">
+                <span className="block text-xs font-semibold uppercase tracking-widest text-dim">Confirm new password</span>
+                <input type="password" value={credentials.confirmPassword} onChange={(event) => setCredentials((current) => ({ ...current, confirmPassword: event.target.value }))} autoComplete="new-password" className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-ink placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-aurora-violet/60" placeholder="••••••••" />
+              </label>}
+
+              {resetMessage && <div role="status" className="rounded-xl border border-aurora-teal/40 bg-aurora-teal/10 px-4 py-3 text-sm text-teal-100">{resetMessage}</div>}
 
               {authError && (
                 <div role="alert" className="rounded-xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -620,14 +664,16 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={loginLoading || !credentials.username.trim() || !credentials.password.trim()}
+                disabled={loginLoading || (authMode === "forgot" ? !credentials.email.trim() : authMode === "reset" ? !credentials.password.trim() || !credentials.confirmPassword.trim() || !resetToken : !credentials.username.trim() || !credentials.password.trim() || (authMode === "register" && !credentials.email.trim()))}
                 className="btn-aurora w-full inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3.5 text-sm font-semibold text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loginLoading
                   ? authMode === "register" ? "Creating account…" : "Signing in…"
-                  : authMode === "register" ? "Create account" : "Enter the studio"}
+                  : authMode === "register" ? "Create account" : authMode === "forgot" ? "Send reset link" : authMode === "reset" ? "Reset password" : "Enter the studio"}
               </button>
             </form>
+                {authMode === "login" && <button type="button" onClick={() => { setAuthError(""); setResetMessage(""); setAuthMode("forgot"); }} className="mt-4 w-full text-center text-xs font-semibold text-aurora-cyan hover:underline">Forgot your password?</button>}
+                {(authMode === "forgot" || authMode === "reset") && <button type="button" onClick={() => { setAuthError(""); setResetMessage(""); setAuthMode("login"); }} className="mt-4 w-full text-center text-xs font-semibold text-dim hover:text-ink">Back to sign in</button>}
           </section>
         </div>
       </div>

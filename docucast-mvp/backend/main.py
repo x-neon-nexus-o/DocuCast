@@ -41,7 +41,10 @@ from backend.utils.auth import (
     list_episodes,
     list_playlists,
     register_user,
+    register_user_with_email,
     reset_password,
+    request_password_reset,
+    reset_password_with_token,
     revoke_session,
     save_episode,
     save_playlist,
@@ -114,6 +117,16 @@ class LoginRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     username: str
+    email: str
+    password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
     password: str
 
 
@@ -283,7 +296,7 @@ def register(payload: RegisterRequest, request: Request) -> dict:
         raise HTTPException(status_code=403, detail="Registration is disabled on this server.")
     _check_throttle(_client_ip(request), max_requests=AUTH_THROTTLE_MAX_REQUESTS)
     try:
-        register_user(payload.username, payload.password)
+        register_user_with_email(payload.username, payload.email, payload.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -293,6 +306,29 @@ def register(payload: RegisterRequest, request: Request) -> dict:
         "token_type": "bearer",
         "user": {"username": payload.username.strip()},
     }
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(payload: ForgotPasswordRequest, request: Request) -> dict:
+    """Start reset without revealing whether an email is registered."""
+    _check_throttle(_client_ip(request), max_requests=AUTH_THROTTLE_MAX_REQUESTS)
+    try:
+        token = request_password_reset(payload.email)
+        if token and os.getenv("DOCUCAST_ALLOW_DEV_RESET_LINK", "false").lower() == "true":
+            return {"message": "If that email is registered, a reset link has been sent.", "development_token": token}
+    except Exception:
+        # Do not expose SMTP or account details through this endpoint.
+        pass
+    return {"message": "If that email is registered, a reset link has been sent."}
+
+
+@app.post("/auth/reset-password")
+def reset_password_endpoint(payload: ResetPasswordRequest) -> dict:
+    try:
+        reset_password_with_token(payload.token, payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"message": "Password reset successful. Please sign in with your new password."}
 
 
 @app.get("/auth/me")

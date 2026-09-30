@@ -237,6 +237,15 @@ DOCUCAST_PASSWORD=docucast
 DOCUCAST_AUTH_SECRET=change-me-for-deployment
 DOCUCAST_TOKEN_TTL_SECONDS=43200
 
+# Password reset email delivery (optional for local development)
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_FROM=no-reply@example.com
+# Never enable this in production; prints a reset token for local testing only.
+DOCUCAST_ALLOW_DEV_RESET_LINK=false
+
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB_NAME=docucast
