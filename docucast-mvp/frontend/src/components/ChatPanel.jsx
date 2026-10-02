@@ -9,8 +9,101 @@ const SUGGESTED_QUESTIONS = [
   "Explain the main idea in one sentence.",
 ];
 
+function formatTime(seconds) {
+  if (!Number.isFinite(seconds)) return "0:00";
+  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+}
+
+function VoiceReplyPlayer({ audioBase64, audioMime }) {
+  const audioRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [rate, setRate] = useState(1);
+  const src = `data:${audioMime || "audio/mpeg"};base64,${audioBase64}`;
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return undefined;
+    const onTime = () => setCurrent(audio.currentTime);
+    const onMeta = () => setDuration(audio.duration || 0);
+    const onEnd = () => setPlaying(false);
+    audio.addEventListener("timeupdate", onTime);
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.addEventListener("durationchange", onMeta);
+    audio.addEventListener("ended", onEnd);
+    audio.play().then(() => setPlaying(true)).catch(() => {});
+    return () => {
+      audio.removeEventListener("timeupdate", onTime);
+      audio.removeEventListener("loadedmetadata", onMeta);
+      audio.removeEventListener("durationchange", onMeta);
+      audio.removeEventListener("ended", onEnd);
+    };
+  }, [src]);
+
+  const toggle = () => {
+    if (!audioRef.current) return;
+    if (playing) audioRef.current.pause();
+    else audioRef.current.play().catch(() => {});
+    setPlaying(!playing);
+  };
+
+  const skip = (seconds) => {
+    if (audioRef.current) audioRef.current.currentTime = Math.max(0, Math.min(duration, audioRef.current.currentTime + seconds));
+  };
+
+  const cycleRate = () => {
+    const rates = [1, 1.25, 1.5, 2, 0.75];
+    const next = rates[(rates.indexOf(rate) + 1) % rates.length];
+    setRate(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  };
+
+  const download = () => {
+    const link = document.createElement("a");
+    link.href = src;
+    link.download = "docucast-answer.mp3";
+    link.click();
+  };
+
+  return (
+    <div className="glass-deep mt-3 rounded-2xl p-3.5">
+      <audio ref={audioRef} src={src} preload="metadata" />
+      <div className="flex items-center gap-3">
+        <button type="button" onClick={toggle} aria-label={playing ? "Pause spoken answer" : "Play spoken answer"} className="btn-aurora grid h-10 w-10 shrink-0 place-items-center rounded-full text-sm text-white">
+          {playing ? "❚❚" : "▶"}
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-dim">
+            <span className="truncate">Spoken answer · DocuCast voice</span>
+            <span className="shrink-0 tabular-nums">{formatTime(current)} / {formatTime(duration)}</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max={duration || 0}
+            step="0.1"
+            value={Math.min(current, duration || 0)}
+            onChange={(event) => { if (audioRef.current) audioRef.current.currentTime = Number(event.target.value); }}
+            className="seek mt-2 w-full"
+            style={{ "--seek": `${duration ? (current / duration) * 100 : 0}%` }}
+            aria-label="Seek through spoken answer"
+          />
+        </div>
+      </div>
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        <button type="button" onClick={() => skip(-10)} className="chip-btn" aria-label="Back 10 seconds">↺ 10s</button>
+        <button type="button" onClick={() => skip(10)} className="chip-btn" aria-label="Forward 10 seconds">10s ↻</button>
+        <button type="button" onClick={cycleRate} className="chip-btn" aria-label={`Playback speed ${rate}x`}>{rate}×</button>
+        <span className="flex-1" />
+        <button type="button" onClick={download} className="chip-btn">⇩ Download</button>
+      </div>
+    </div>
+  );
+}
+
 /* One chat bubble (user right, assistant left) */
-function Bubble({ role, children, pending }) {
+function Bubble({ role, children, pending, audioBase64, audioMime }) {
   const isUser = role === "user";
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in`}>
@@ -29,7 +122,10 @@ function Bubble({ role, children, pending }) {
             thinking
           </span>
         ) : (
-          children
+          <>
+            {children}
+            {audioBase64 && <VoiceReplyPlayer audioBase64={audioBase64} audioMime={audioMime} />}
+          </>
         )}
       </div>
     </div>
@@ -90,7 +186,12 @@ export default function ChatPanel({ authToken, episodeId }) {
         { question: q },
         { headers: { Authorization: `Bearer ${authToken}` }, timeout: 60_000 },
       );
-      setMessages((m) => [...(m || []), { role: "assistant", content: data.answer }]);
+      setMessages((m) => [...(m || []), {
+        role: "assistant",
+        content: data.answer,
+        audio_base64: data.audio_base64,
+        audio_mime: data.audio_mime,
+      }]);
     } catch (err) {
       const msg = err?.response?.data?.detail || err?.message || "The assistant couldn't answer.";
       setError(msg);
@@ -154,7 +255,7 @@ export default function ChatPanel({ authToken, episodeId }) {
           </div>
         ) : (
           messages.map((m, i) => (
-            <Bubble key={i} role={m.role}>{m.content}</Bubble>
+            <Bubble key={i} role={m.role} audioBase64={m.audio_base64} audioMime={m.audio_mime}>{m.content}</Bubble>
           ))
         )}
         {asking && <Bubble role="assistant" pending />}

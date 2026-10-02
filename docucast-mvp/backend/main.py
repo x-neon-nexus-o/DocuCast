@@ -1116,13 +1116,26 @@ def chat_ask(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Chat failed: {exc}") from exc
 
+    audio_payload = {}
+    try:
+        audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(f"NOVA: {answer}")
+        audio_payload = {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "audio_mime": audio_mime,
+            "audio_engine": audio_engine,
+            "transcript_segments": transcript_segments,
+        }
+    except Exception:
+        # Voice replies are an enhancement; never make grounded text chat fail.
+        pass
+
     try:
         add_chat_message(current_user, episode_id, "user", question)
         add_chat_message(current_user, episode_id, "assistant", answer)
     except Exception:
         pass
 
-    return {"answer": answer}
+    return {"answer": answer, **audio_payload}
 
 
 @app.delete("/episodes/{episode_id}/chat")

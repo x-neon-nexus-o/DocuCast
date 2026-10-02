@@ -277,6 +277,23 @@ html[data-theme="light"] .glass-deep {
   transform: translateY(0) scale(0.99);
 }
 
+.chip-btn {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.375rem 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  font-weight: 600;
+  transition: color 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+}
+
+.chip-btn:hover {
+  color: var(--text-ink);
+  border-color: rgba(139, 92, 246, 0.5);
+  transform: translateY(-1px);
+}
+
 /* ------------------------------------------------------------------ */
 /* Cinematic scroll reveal                                             */
 /* ------------------------------------------------------------------ */
