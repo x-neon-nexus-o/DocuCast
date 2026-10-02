@@ -693,15 +693,15 @@ export default function App() {
       {/* Glass nav */}
       <header className="sticky top-0 z-40">
         <div className="glass-deep border-x-0 border-t-0 rounded-none">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-4 sm:px-6 py-3.5">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3.5">
             <Logo />
-            <div className="flex items-center gap-4">
+            <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:gap-4">
               <span className="hidden sm:inline text-xs text-dim">
                 <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-aurora-teal animate-pulse-soft align-middle" aria-hidden="true" />
                 {authUser?.username || "signed in"}
               </span>
               {/* Dashboard / Studio / Playlists view switch */}
-              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/25 p-1" role="tablist" aria-label="Main views">
+              <div className="order-3 flex w-full items-center justify-center gap-1 rounded-full border border-white/10 bg-black/25 p-1 sm:order-none sm:w-auto" role="tablist" aria-label="Main views">
                 {[
                   { key: "dashboard", label: "Dashboard", glyph: "◫" },
                   { key: "studio", label: "Studio", glyph: "◉" },

@@ -107,6 +107,33 @@ body {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
+/* Keep user content readable instead of letting long URLs, filenames, or
+   generated markers widen the page on small screens. */
+button,
+input,
+textarea,
+select,
+pre,
+td,
+th {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .glass,
+  .glass-deep {
+    border-radius: 1.25rem;
+  }
+
+  .btn-aurora {
+    min-height: 2.75rem;
+  }
+
+  input[type="range"] {
+    min-height: 1.5rem;
+  }
+}
+
 ::selection {
   background: rgba(139, 92, 246, 0.45);
   color: #fff;
