@@ -19,6 +19,7 @@ from typing import Any, Optional
 from bson import ObjectId
 from bson.errors import InvalidId
 import pymongo
+import gridfs
 from pymongo import MongoClient
 from pymongo.database import Database
 
@@ -401,6 +402,20 @@ def save_episode(username: str, episode: dict) -> str:
         except Exception:
             show_notes = None
 
+    audio_base64 = episode.get("audio_base64")
+    audio_gridfs_id = None
+    if audio_base64:
+        try:
+            audio_bytes = __import__("base64").b64decode(audio_base64)
+            bucket = gridfs.GridFSBucket(db, bucket_name="docucast_audio")
+            audio_gridfs_id = bucket.upload_from_stream(
+                episode.get("filename", "episode") + ".audio",
+                audio_bytes,
+                metadata={"username": username, "mime": episode.get("audio_mime") or "audio/mpeg"},
+            )
+        except Exception:
+            audio_gridfs_id = None
+
     doc = {
         "user_id": user_id,
         "username": username,
@@ -415,7 +430,9 @@ def save_episode(username: str, episode: dict) -> str:
         "audio_engine": episode.get("audio_engine"),
         "audio_mime": episode.get("audio_mime"),
         "script": episode.get("script", ""),
-        "audio_base64": episode.get("audio_base64"),
+        "audio_gridfs_id": audio_gridfs_id,
+        # Kept only as a compatibility fallback for older deployments if GridFS is unavailable.
+        "audio_base64": episode.get("audio_base64") if audio_gridfs_id is None else None,
         "transcript_segments": episode.get("transcript_segments") or [],
         "analysis": analysis,
         "source_text": episode.get("source_text"),
@@ -425,6 +442,25 @@ def save_episode(username: str, episode: dict) -> str:
     }
     result = db.episodes.insert_one(doc)
     return str(result.inserted_id)
+
+
+def get_episode_audio(username: str, episode_id: Any) -> Optional[tuple[bytes, str]]:
+    """Read episode audio from GridFS, with legacy base64 fallback."""
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query = {"username": username, "_id": obj_id} if obj_id else {"username": username, "_id": str(episode_id)}
+    doc = db.episodes.find_one(query, projection={"audio_gridfs_id": 1, "audio_base64": 1, "audio_mime": 1})
+    if not doc:
+        return None
+    if doc.get("audio_gridfs_id"):
+        try:
+            bucket = gridfs.GridFSBucket(db, bucket_name="docucast_audio")
+            return bucket.open_download_stream(doc["audio_gridfs_id"]).read(), doc.get("audio_mime") or "audio/mpeg"
+        except Exception:
+            return None
+    if doc.get("audio_base64"):
+        return __import__("base64").b64decode(doc["audio_base64"]), doc.get("audio_mime") or "audio/mpeg"
+    return None
 
 
 def list_episodes(username: str, limit: int = 50) -> dict:

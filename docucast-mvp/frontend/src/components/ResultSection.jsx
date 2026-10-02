@@ -626,6 +626,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
   const {
     script,
     audio_base64: audioBase64,
+    audio_url: audioUrl,
     audio_mime: audioMime,
     audio_engine: audioEngine,
     audio_error: audioError,
@@ -675,9 +676,10 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
   }, [showEditor, script]);
 
   const audioSrc = useMemo(() => {
+    if (audioUrl) return audioUrl;
     if (!audioBase64) return null;
     return `data:${audioMime || "audio/mpeg"};base64,${audioBase64}`;
-  }, [audioBase64, audioMime]);
+  }, [audioBase64, audioMime, audioUrl]);
 
   const downloadName = useMemo(() => {
     const base = (fileName || result.filename || "document").replace(/\.(pdf|pptx|md|markdown|txt)$/i, "");

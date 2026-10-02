@@ -35,6 +35,7 @@ from backend.utils.auth import (
     delete_playlist,
     ensure_user,
     get_episode,
+    get_episode_audio,
     get_episode_source,
     get_playlist,
     initialize_database,
@@ -305,6 +306,14 @@ def _require_user(authorization: Optional[str] = Header(default=None)) -> str:
 @app.post("/auth/login")
 def login(payload: LoginRequest, request: Request) -> dict:
     _check_throttle(_client_ip(request), max_requests=AUTH_THROTTLE_MAX_REQUESTS)
+    if (
+        AUTH_USERNAME == "admin"
+        and AUTH_PASSWORD == "docucast"
+        and payload.username.strip() == "admin"
+        and payload.password == "docucast"
+        and os.getenv("DOCUCAST_ALLOW_DEFAULT_CREDENTIALS", "false").lower() != "true"
+    ):
+        raise HTTPException(status_code=403, detail="The default admin password is disabled. Set DOCUCAST_PASSWORD to a strong value before signing in.")
     if not authenticate_user(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
@@ -1068,6 +1077,27 @@ def episodes_get(episode_id: str, current_user: str = Depends(_require_user)) ->
     return episode
 
 
+@app.get("/episodes/{episode_id}/audio")
+def episodes_audio(
+    episode_id: str,
+    authorization: Optional[str] = Header(default=None),
+    access_token: Optional[str] = None,
+):
+    """Stream stored episode audio from GridFS without embedding it in MongoDB documents."""
+    from fastapi.responses import Response
+
+    token = access_token or (authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else "")
+    try:
+        current_user = verify_session(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    audio = get_episode_audio(current_user, episode_id)
+    if audio is None:
+        raise HTTPException(status_code=404, detail="Audio not found.")
+    data, mime = audio
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "private, max-age=3600"})
+
+
 @app.delete("/episodes/{episode_id}")
 def episodes_delete(episode_id: str, current_user: str = Depends(_require_user)) -> dict:
     if not delete_episode(current_user, episode_id):
@@ -1116,6 +1146,8 @@ def chat_ask(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Chat failed: {exc}") from exc
 
+    episode_for_citations = get_episode(current_user, episode_id) or {}
+    citations = (episode_for_citations.get("analysis") or {}).get("citations", [])
     audio_payload = {}
     try:
         audio_bytes, audio_engine, audio_mime, transcript_segments = generate_audio(f"NOVA: {answer}")
@@ -1135,7 +1167,7 @@ def chat_ask(
     except Exception:
         pass
 
-    return {"answer": answer, **audio_payload}
+    return {"answer": answer, "citations": citations, **audio_payload}
 
 
 @app.delete("/episodes/{episode_id}/chat")

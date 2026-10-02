@@ -502,6 +502,7 @@ export default function App() {
       setResult({
         script: data.script,
         audio_base64: data.audio_base64,
+        audio_url: data.audio_base64 ? null : `${API_URL}/episodes/${data.id}/audio?access_token=${encodeURIComponent(authToken)}`,
         audio_engine: data.audio_engine,
         audio_mime: data.audio_mime,
         provider: data.provider,

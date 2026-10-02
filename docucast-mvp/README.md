@@ -311,6 +311,8 @@ The transcript returned by the TTS layer uses this shape:
 | `POST` | `/auth/login` | Sign in and receive a bearer token |
 | `POST` | `/auth/logout` | Revoke the current session |
 | `GET` | `/auth/me` | Validate the current session |
+| `POST` | `/episodes/{id}/chat` | Ask a grounded question with citations and optional spoken answer |
+| `GET` | `/episodes/{id}/audio` | Stream stored audio from MongoDB GridFS |
 | `POST` | `/ingest-preview` | Preview a URL before generation |
 | `POST` | `/generate` | Generate one episode from a file or URL |
 | `POST` | `/batch-generate` | Queue multiple sources as a playlist |
@@ -334,10 +336,12 @@ DocuCast uses the `docucast` database and creates these collections:
 docucast
 ├── users          # accounts and password hashes
 ├── sessions       # hashed bearer tokens with TTL cleanup
-├── episodes       # scripts, audio, source metadata, transcripts
+├── episodes       # scripts, source metadata, transcripts, GridFS audio IDs
 ├── chat_messages  # episode conversations
 └── playlists      # ordered episode groups
 ```
+
+Audio bytes are stored in MongoDB GridFS rather than inside episode documents, avoiding MongoDB's 16 MB document limit. Existing legacy base64 audio remains readable through a compatibility fallback.
 
 Connect with MongoDB Compass using `mongodb://localhost:27017` to inspect the data.
 
