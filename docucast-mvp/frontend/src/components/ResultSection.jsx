@@ -660,6 +660,7 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
   });
   const [showStudyCards, setShowStudyCards] = useState(false);
   const [revealedCard, setRevealedCard] = useState(-1);
+  const [shareStatus, setShareStatus] = useState("");
   const turnRefs = useRef([]);
 
   useEffect(() => {
@@ -775,6 +776,25 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
     }
   };
 
+  const shareEpisode = async () => {
+    if (!episodeId || !authToken) return;
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || "/api"}/episodes/${episodeId}/share`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!response.ok) throw new Error("Share failed");
+      const data = await response.json();
+      const url = `${window.location.origin}/shared/episodes/${data.token}`;
+      await navigator.clipboard.writeText(url);
+      setShareStatus("Link copied");
+      setTimeout(() => setShareStatus(""), 2500);
+    } catch {
+      setShareStatus("Could not share");
+      setTimeout(() => setShareStatus(""), 2500);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6 animate-fade-up">
       {/* Header row */}
@@ -796,6 +816,11 @@ export default function ResultSection({ result, fileName, onRegenerate, onResynt
         <span className="rounded-full border border-white/15 px-3 py-1 text-[11px] font-semibold text-dim">
           {wordCount} words
         </span>
+        {episodeId && (
+          <button type="button" onClick={shareEpisode} className="rounded-full border border-aurora-cyan/40 bg-aurora-cyan/10 px-3 py-1 text-[11px] font-semibold text-cyan-200 hover:border-aurora-cyan/70">
+            {shareStatus || "Share episode"}
+          </button>
+        )}
       </div>
 
       {(providerNote || audioNote) && (

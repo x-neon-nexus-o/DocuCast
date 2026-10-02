@@ -44,6 +44,11 @@ LANGUAGE_DEFAULTS = {
     "it": {"a": "it-IT-ElsaNeural", "b": "it-IT-DiegoNeural", "gtts": "it"},
     "pt": {"a": "pt-BR-FranciscaNeural", "b": "pt-BR-AntonioNeural", "gtts": "pt"},
     "hi": {"a": "hi-IN-SwaraNeural", "b": "hi-IN-MadhurNeural", "gtts": "hi"},
+    "mr": {"a": "mr-IN-AarohiNeural", "b": "mr-IN-ManoharNeural", "gtts": "mr"},
+    "ta": {"a": "ta-IN-PallaviNeural", "b": "ta-IN-ValluvarNeural", "gtts": "ta"},
+    "bn": {"a": "bn-IN-TanishaaNeural", "b": "bn-IN-BashkarNeural", "gtts": "bn"},
+    "te": {"a": "te-IN-ShrutiNeural", "b": "te-IN-MohanNeural", "gtts": "te"},
+    "kn": {"a": "kn-IN-SapnaNeural", "b": "kn-IN-GaganNeural", "gtts": "kn"},
     "ja": {"a": "ja-JP-NanamiNeural", "b": "ja-JP-KeitaNeural", "gtts": "ja"},
 }
 ESPEAK_VOICES = {

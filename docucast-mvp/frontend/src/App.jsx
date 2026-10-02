@@ -49,6 +49,8 @@ export const DEFAULT_STUDIO = {
   language: "en",
   host_a_name: "NOVA",
   host_b_name: "RHYS",
+  host_a_persona: "curious guide",
+  host_b_persona: "expert explainer",
   host_a_voice: "en-US-JennyNeural",
   host_b_voice: "en-US-GuyNeural",
   host_a_rate: 0,
@@ -66,7 +68,7 @@ function loadStudioPrefs() {
     const saved = JSON.parse(raw);
     const valid = {
       mode: ["dialogue", "solo"],
-      language: ["en", "es", "fr", "de", "it", "pt", "hi", "ja"],
+      language: ["en", "es", "fr", "de", "it", "pt", "hi", "mr", "ta", "bn", "te", "kn", "ja"],
       length: ["brief", "standard", "deep"],
       tone: ["conversational", "energetic", "calm", "expert"],
       audience: ["general", "student", "expert", "executive"],
@@ -76,7 +78,7 @@ function loadStudioPrefs() {
       if (allowed.includes(saved[key])) merged[key] = saved[key];
     }
     if (typeof saved.focus === "string") merged.focus = saved.focus.slice(0, 300);
-    for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice"]) {
+    for (const key of ["host_a_name", "host_b_name", "host_a_persona", "host_b_persona", "host_a_voice", "host_b_voice"]) {
       if (typeof saved[key] === "string") merged[key] = saved[key].slice(0, 80);
     }
     for (const key of ["host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
@@ -170,6 +172,10 @@ function Logo({ size = "text-xl" }) {
 /* ------------------------------------------------------------------ */
 export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
+  const [sharedEpisode, setSharedEpisode] = useState(null);
+  const sharedToken = window.location.pathname.startsWith("/shared/episodes/")
+    ? window.location.pathname.split("/").filter(Boolean).pop()
+    : "";
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [authUser, setAuthUser] = useState(null);
   const [authError, setAuthError] = useState("");
@@ -237,6 +243,14 @@ export default function App() {
       isActive = false;
     };
   }, [clearSession]);
+
+  useEffect(() => {
+    if (!sharedToken) return undefined;
+    axios.get(`${API_URL}/shared/episodes/${sharedToken}`, { timeout: 15_000 })
+      .then(({ data }) => setSharedEpisode(data))
+      .catch(() => setSharedEpisode({ error: "This shared episode is unavailable." }));
+    return undefined;
+  }, [sharedToken]);
 
   // Persist studio preferences whenever they change.
   useEffect(() => {
@@ -368,7 +382,7 @@ export default function App() {
     formData.append("audience", studio.audience);
     formData.append("focus", studio.focus || "");
     formData.append("language", studio.language || "en");
-    for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
+    for (const key of ["host_a_name", "host_b_name", "host_a_persona", "host_b_persona", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
       formData.append(key, String(studio[key] ?? ""));
     }
     if (params.redactedSource) formData.append("redacted_source", params.redactedSource);
@@ -447,7 +461,7 @@ export default function App() {
       formData.append("audience", studio.audience);
       formData.append("focus", studio.focus || "");
       formData.append("language", studio.language || "en");
-      for (const key of ["host_a_name", "host_b_name", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
+      for (const key of ["host_a_name", "host_b_name", "host_a_persona", "host_b_persona", "host_a_voice", "host_b_voice", "host_a_rate", "host_b_rate", "host_a_pitch", "host_b_pitch"]) {
         formData.append(key, String(studio[key] ?? ""));
       }
       const { data } = await axios.post(`${API_URL}/regenerate`, formData, {
@@ -536,6 +550,27 @@ export default function App() {
   /* ------------------------------------------------------------ */
   /* Session check splash                                          */
   /* ------------------------------------------------------------ */
+  if (sharedToken) {
+    if (!sharedEpisode) {
+      return <div className="min-h-full flex items-center justify-center text-ink"><AuroraBackdrop /><p className="text-sm text-dim">Loading shared episode…</p></div>;
+    }
+    if (sharedEpisode.error) {
+      return <div className="min-h-full flex items-center justify-center px-4 text-ink"><AuroraBackdrop /><div className="glass rounded-3xl p-8 text-center"><Logo size="text-3xl" /><p className="mt-4 text-sm text-red-200">{sharedEpisode.error}</p></div></div>;
+    }
+    return (
+      <div className="min-h-full px-4 py-10 text-ink">
+        <AuroraBackdrop />
+        <main className="mx-auto max-w-3xl glass rounded-[2rem] p-6 sm:p-10">
+          <Logo size="text-3xl" />
+          <p className="mt-8 text-xs font-semibold uppercase tracking-[0.3em] text-aurora-cyan">Shared DocuCast episode</p>
+          <h1 className="mt-2 font-display text-3xl font-bold">{sharedEpisode.filename || "Shared episode"}</h1>
+          {sharedEpisode.audio_url && <audio className="mt-6 w-full" controls src={`${API_URL}${sharedEpisode.audio_url}`} />}
+          <pre className="mt-6 max-h-[32rem] overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-ink/90">{sharedEpisode.script}</pre>
+        </main>
+      </div>
+    );
+  }
+
   if (authLoading) {
     return (
       <div className="min-h-full text-ink flex items-center justify-center px-4">

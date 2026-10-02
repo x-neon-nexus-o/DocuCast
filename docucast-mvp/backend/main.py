@@ -12,6 +12,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
+from xml.sax.saxutils import escape
 
 # Keep imports working when launched as either `main:app` from backend or
 # `backend.main:app` from the repository root.
@@ -36,6 +37,9 @@ from backend.utils.auth import (
     ensure_user,
     get_episode,
     get_episode_audio,
+    create_episode_share,
+    get_shared_episode,
+    get_shared_episode_audio,
     get_episode_source,
     get_playlist,
     initialize_database,
@@ -109,7 +113,7 @@ else:
 AUTH_USERNAME = os.getenv("DOCUCAST_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("DOCUCAST_PASSWORD", "docucast")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DOCUCAST_TOKEN_TTL_SECONDS", "43200"))
-SUPPORTED_LANGUAGES = {"en", "es", "fr", "de", "it", "pt", "hi", "ja"}
+SUPPORTED_LANGUAGES = {"en", "es", "fr", "de", "it", "pt", "hi", "mr", "ta", "bn", "te", "kn", "ja"}
 
 
 class LoginRequest(BaseModel):
@@ -527,6 +531,8 @@ async def generate(
     redacted_source: str = Form(""),
     host_a_name: str = Form("NOVA"),
     host_b_name: str = Form("RHYS"),
+    host_a_persona: str = Form("curious guide"),
+    host_b_persona: str = Form("expert explainer"),
     host_a_voice: str = Form("en-US-JennyNeural"),
     host_b_voice: str = Form("en-US-GuyNeural"),
     host_a_rate: int = Form(0),
@@ -554,6 +560,8 @@ async def generate(
         "language": language if language in SUPPORTED_LANGUAGES else "en",
         "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
         "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
+        "host_a_persona": (host_a_persona or "curious guide").strip()[:160],
+        "host_b_persona": (host_b_persona or "expert explainer").strip()[:160],
         "host_a_voice": host_a_voice,
         "host_b_voice": host_b_voice,
         "host_a_rate": max(-50, min(50, host_a_rate)),
@@ -780,6 +788,8 @@ def regenerate(
     language: str = Form("en"),
     host_a_name: str = Form("NOVA"),
     host_b_name: str = Form("RHYS"),
+    host_a_persona: str = Form("curious guide"),
+    host_b_persona: str = Form("expert explainer"),
     host_a_voice: str = Form("en-US-JennyNeural"),
     host_b_voice: str = Form("en-US-GuyNeural"),
     host_a_rate: int = Form(0),
@@ -811,6 +821,8 @@ def regenerate(
         "language": language if language in SUPPORTED_LANGUAGES else "en",
         "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
         "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
+        "host_a_persona": (host_a_persona or "curious guide").strip()[:160],
+        "host_b_persona": (host_b_persona or "expert explainer").strip()[:160],
         "host_a_voice": host_a_voice,
         "host_b_voice": host_b_voice,
         "host_a_rate": max(-50, min(50, host_a_rate)),
@@ -929,6 +941,8 @@ async def batch_generate(
     language: str = Form("en"),
     host_a_name: str = Form("NOVA"),
     host_b_name: str = Form("RHYS"),
+    host_a_persona: str = Form("curious guide"),
+    host_b_persona: str = Form("expert explainer"),
     host_a_voice: str = Form("en-US-JennyNeural"),
     host_b_voice: str = Form("en-US-GuyNeural"),
     host_a_rate: int = Form(0),
@@ -976,6 +990,8 @@ async def batch_generate(
         "language": language if language in SUPPORTED_LANGUAGES else "en",
         "host_a_name": (host_a_name or "NOVA").strip()[:24] or "NOVA",
         "host_b_name": (host_b_name or "RHYS").strip()[:24] or "RHYS",
+        "host_a_persona": (host_a_persona or "curious guide").strip()[:160],
+        "host_b_persona": (host_b_persona or "expert explainer").strip()[:160],
         "host_a_voice": host_a_voice,
         "host_b_voice": host_b_voice,
         "host_a_rate": max(-50, min(50, host_a_rate)),
@@ -1057,6 +1073,25 @@ def playlists_delete(playlist_id: str, current_user: str = Depends(_require_user
     return {"deleted": True}
 
 
+@app.get("/playlists/{playlist_id}/rss")
+def playlist_rss(playlist_id: str, current_user: str = Depends(_require_user)):
+    from fastapi.responses import Response
+
+    playlist = get_playlist(current_user, playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found.")
+    base_url = os.getenv("PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
+    items = []
+    for episode in playlist.get("episodes", []):
+        episode_id = escape(str(episode.get("id", "")))
+        title = escape(episode.get("filename", "DocuCast episode"))
+        share_token = create_episode_share(current_user, episode.get("id")) or ""
+        audio_url = f"{base_url}/shared/episodes/{share_token}/audio" if share_token else f"{base_url}/episodes/{episode_id}/audio"
+        items.append(f"<item><title>{title}</title><guid>{base_url}/episodes/{episode_id}</guid><enclosure url=\"{escape(audio_url)}\" type=\"{escape(episode.get('audio_mime') or 'audio/mpeg')}\" /></item>")
+    xml = f"<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>{escape(playlist.get('title', 'DocuCast playlist'))}</title><description>{escape(playlist.get('description', ''))}</description>{''.join(items)}</channel></rss>"
+    return Response(content=xml, media_type="application/rss+xml")
+
+
 # ---------------------------------------------------------------------------
 # Episodes & Chat
 # ---------------------------------------------------------------------------
@@ -1103,6 +1138,33 @@ def episodes_delete(episode_id: str, current_user: str = Depends(_require_user))
     if not delete_episode(current_user, episode_id):
         raise HTTPException(status_code=404, detail="Episode not found.")
     return {"deleted": True}
+
+
+@app.post("/episodes/{episode_id}/share")
+def episodes_share(episode_id: str, current_user: str = Depends(_require_user)) -> dict:
+    token = create_episode_share(current_user, episode_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="Episode not found.")
+    return {"token": token, "path": f"/shared/episodes/{token}"}
+
+
+@app.get("/shared/episodes/{token}")
+def shared_episode(token: str) -> dict:
+    episode = get_shared_episode(token)
+    if episode is None:
+        raise HTTPException(status_code=404, detail="Shared episode not found.")
+    return episode
+
+
+@app.get("/shared/episodes/{token}/audio")
+def shared_episode_audio(token: str):
+    from fastapi.responses import Response
+
+    audio = get_shared_episode_audio(token)
+    if audio is None:
+        raise HTTPException(status_code=404, detail="Shared audio not found.")
+    data, mime = audio
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
 
 
 class ChatRequest(BaseModel):

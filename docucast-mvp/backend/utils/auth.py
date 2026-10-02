@@ -578,6 +578,51 @@ def delete_episode(username: str, episode_id: Any) -> bool:
     return False
 
 
+def create_episode_share(username: str, episode_id: Any) -> Optional[str]:
+    """Create or reuse a random public share token for an owned episode."""
+    db = get_db()
+    obj_id = _safe_object_id(episode_id)
+    query = {"username": username, "_id": obj_id} if obj_id else {"username": username, "_id": str(episode_id)}
+    token = secrets.token_urlsafe(24)
+    result = db.episodes.update_one(query, {"$set": {"share_token": token, "shared_at": int(time.time())}})
+    return token if result.matched_count else None
+
+
+def get_shared_episode(token: str) -> Optional[dict]:
+    """Return safe public episode metadata for a valid share token."""
+    db = get_db()
+    doc = db.episodes.find_one({"share_token": (token or "").strip()}, projection={"audio_base64": 0, "source_text": 0})
+    if not doc:
+        return None
+    return {
+        "id": str(doc["_id"]),
+        "filename": doc.get("filename", ""),
+        "script": doc.get("script", ""),
+        "transcript_segments": doc.get("transcript_segments") or [],
+        "analysis": doc.get("analysis"),
+        "show_notes": doc.get("show_notes"),
+        "audio_mime": doc.get("audio_mime"),
+        "audio_url": f"/shared/episodes/{token}/audio",
+        "created_at": doc.get("created_at", 0),
+    }
+
+
+def get_shared_episode_audio(token: str) -> Optional[tuple[bytes, str]]:
+    db = get_db()
+    doc = db.episodes.find_one({"share_token": (token or "").strip()}, projection={"_id": 1, "audio_gridfs_id": 1, "audio_base64": 1, "audio_mime": 1})
+    if not doc:
+        return None
+    if doc.get("audio_gridfs_id"):
+        bucket = gridfs.GridFSBucket(db, bucket_name="docucast_audio")
+        try:
+            return bucket.open_download_stream(doc["audio_gridfs_id"]).read(), doc.get("audio_mime") or "audio/mpeg"
+        except Exception:
+            return None
+    if doc.get("audio_base64"):
+        return __import__("base64").b64decode(doc["audio_base64"]), doc.get("audio_mime") or "audio/mpeg"
+    return None
+
+
 def update_episode_script(
     username: str,
     episode_id: Any,

@@ -63,6 +63,8 @@ DEFAULT_OPTIONS = {
     "language": "en",
     "host_a_name": "NOVA",
     "host_b_name": "RHYS",
+    "host_a_persona": "curious guide",
+    "host_b_persona": "expert explainer",
 }
 
 HOST_A = "NOVA"
@@ -73,6 +75,8 @@ def build_system_instruction(options: dict | None = None) -> str:
     opts = {**DEFAULT_OPTIONS, **(options or {})}
     host_a = str(opts.get("host_a_name") or HOST_A).strip()[:24] or HOST_A
     host_b = str(opts.get("host_b_name") or HOST_B).strip()[:24] or HOST_B
+    persona_a = str(opts.get("host_a_persona") or "curious guide").strip()[:160]
+    persona_b = str(opts.get("host_b_persona") or "expert explainer").strip()[:160]
     length_desc, _ = LENGTH_PRESETS.get(opts["length"], LENGTH_PRESETS["standard"])
     tone = TONE_PRESETS.get(opts["tone"], TONE_PRESETS["conversational"])
     audience = AUDIENCE_PRESETS.get(opts["audience"], AUDIENCE_PRESETS["general"])
@@ -104,8 +108,8 @@ Rules for Professional Podcasting:
 
     return (
         f"You are a master scriptwriter writing a premium two-host podcast conversation between {host_a} and {host_b}.\n"
-        f"- {host_a} is the curious guide: asks sharp questions, reacts naturally, and guides the flow.\n"
-        f"- {host_b} is the expert explainer: grounded in the document, breaks down complex ideas, and loves a good analogy.\n"
+        f"- {host_a} persona: {persona_a}. Stay consistent with this personality.\n"
+        f"- {host_b} persona: {persona_b}. Stay consistent with this personality.\n"
         + common_rules
         + f"""- Format STRICTLY as alternating lines, each starting with the speaker name and a colon:
 {host_a}: ...

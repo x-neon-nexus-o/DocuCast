@@ -13,6 +13,11 @@ const LANGUAGE_OPTIONS = [
   ["it", "Italian", "it-IT-ElsaNeural", "it-IT-DiegoNeural"],
   ["pt", "Portuguese", "pt-BR-FranciscaNeural", "pt-BR-AntonioNeural"],
   ["hi", "Hindi", "hi-IN-SwaraNeural", "hi-IN-MadhurNeural"],
+  ["mr", "Marathi", "mr-IN-AarohiNeural", "mr-IN-ManoharNeural"],
+  ["ta", "Tamil", "ta-IN-PallaviNeural", "ta-IN-ValluvarNeural"],
+  ["bn", "Bengali", "bn-IN-TanishaaNeural", "bn-IN-BashkarNeural"],
+  ["te", "Telugu", "te-IN-ShrutiNeural", "te-IN-MohanNeural"],
+  ["kn", "Kannada", "kn-IN-SapnaNeural", "kn-IN-GaganNeural"],
   ["ja", "Japanese", "ja-JP-NanamiNeural", "ja-JP-KeitaNeural"],
 ];
 
@@ -864,6 +869,14 @@ export default function UploadSection({
                       aria-label={`${label} name`}
                       className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-aurora-violet/50"
                       placeholder={label}
+                    />
+                    <input
+                      value={studio[`${prefix}_persona`]}
+                      maxLength={160}
+                      onChange={(e) => updateStudio(`${prefix}_persona`, e.target.value)}
+                      aria-label={`${label} persona`}
+                      className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-aurora-violet/50"
+                      placeholder={prefix === "host_a" ? "curious guide" : "expert explainer"}
                     />
                     <select
                       value={studio[`${prefix}_voice`]}

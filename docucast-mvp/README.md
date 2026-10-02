@@ -249,6 +249,7 @@ DOCUCAST_ALLOW_DEV_RESET_LINK=false
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB_NAME=docucast
+PUBLIC_API_URL=http://localhost:8000
 ```
 
 ### Provider choices
@@ -318,8 +319,12 @@ The transcript returned by the TTS layer uses this shape:
 | `POST` | `/batch-generate` | Queue multiple sources as a playlist |
 | `GET` | `/episodes` | List the current user's episodes |
 | `GET` | `/episodes/{id}` | Retrieve an episode and transcript |
+| `POST` | `/episodes/{id}/share` | Create a public read-only episode link |
+| `GET` | `/shared/episodes/{token}` | Read a shared episode without login |
+| `GET` | `/shared/episodes/{token}/audio` | Stream shared episode audio |
 | `GET` | `/playlists` | List the current user's playlists |
 | `GET` | `/playlists/{id}` | Retrieve a playlist and its episodes |
+| `GET` | `/playlists/{id}/rss` | Generate an RSS feed for podcast apps |
 | `DELETE` | `/playlists/{id}` | Delete a playlist |
 
 Protected endpoints require:
